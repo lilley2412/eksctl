@@ -51,6 +51,7 @@ require (
 	github.com/prometheus/client_golang v1.0.0 // indirect
 	github.com/sanathkr/yaml v1.0.0 // indirect
 	github.com/sirupsen/logrus v1.4.2 // indirect
+	github.com/spf13/afero v1.2.2
 	github.com/spf13/cobra v0.0.3
 	github.com/spf13/pflag v1.0.3
 	github.com/spf13/viper v1.3.2
@@ -73,6 +74,7 @@ require (
 	google.golang.org/grpc v1.21.1 // indirect
 	gopkg.in/gcfg.v1 v1.2.3 // indirect
 	gopkg.in/ini.v1 v1.42.0 // indirect
+	gopkg.in/src-d/go-git.v4 v4.8.1
 	k8s.io/api v0.0.0-20190226173710-145d52631d00
 	k8s.io/apiextensions-apiserver v0.0.0-20190226180157-bd0469a053ff
 	k8s.io/apimachinery v0.0.0-20190221084156-01f179d85dbc
@@ -86,6 +88,7 @@ require (
 	k8s.io/kubelet v0.0.0-20190313123811-3556bcde9670
 	k8s.io/kubernetes v1.12.6
 	k8s.io/utils v0.0.0-20181017222159-a82851343d66 // indirect
+	sigs.k8s.io/kustomize v2.0.3+incompatible
 	sigs.k8s.io/yaml v1.1.0
 )
 
