@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/kris-nova/logger"
-	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -20,10 +19,11 @@ func enableLoggingCmd(rc *cmdutils.ResourceCmd) {
 	cfg := api.NewClusterConfig()
 	rc.ClusterConfig = cfg
 
-	rc.SetDescription("enable-logging", "Update cluster logging configuration", "")
+	rc.SetDescription("update-cluster-logging", "Update cluster logging configuration", "")
 
+	var typesEnabled *[]string
 	rc.SetRunFuncWithNameArg(func() error {
-		return doEnableLogging(rc)
+		return doEnableLogging(rc, typesEnabled)
 	})
 
 	rc.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
@@ -34,49 +34,22 @@ func enableLoggingCmd(rc *cmdutils.ResourceCmd) {
 	})
 
 	rc.FlagSetGroup.InFlagSet("Enable/disable log types", func(fs *pflag.FlagSet) {
-		enableExplicitly := sets.NewString()
 		allSupportedTypes := api.SupportedCloudWatchClusterLogTypes()
-		inherit := sets.NewString()
 
-		enableAll := fs.Bool("all", true, fmt.Sprintf("Enable all supported log types (%s)", strings.Join(allSupportedTypes, ", ")))
+		typesEnabled = fs.StringArray("enable-types", []string{}, fmt.Sprintf("Log types to be enabled, the rest will be disabled. Supported log types: (all,%s)", strings.Join(allSupportedTypes, ", ")))
 
-		for _, logType := range allSupportedTypes {
-			_ = fs.Bool(logType, false, fmt.Sprintf("Enable %q log type", logType))
-		}
-
-		cmdutils.AddPreRun(rc.Command, func(cmd *cobra.Command, args []string) {
-			if *enableAll {
-				inherit.Insert(allSupportedTypes...)
-			}
-
-			for _, logType := range allSupportedTypes {
-				f := cmd.Flag(logType)
-
-				shouldEnable := f.Value.String() == "true"
-				shouldDisable := f.Changed && !shouldEnable
-
-				if shouldEnable {
-					enableExplicitly.Insert(logType)
-					if !cmd.Flag("all").Changed {
-						// do not include all log types if --all wasn't specified explicitly
-						inherit = sets.NewString()
-					}
-				}
-
-				if shouldDisable {
-					inherit.Delete(logType)
-				}
-			}
-
-			cfg.AppendClusterCloudWatchLogTypes(enableExplicitly.List()...)
-			cfg.AppendClusterCloudWatchLogTypes(inherit.List()...)
-		})
 	})
 
 	cmdutils.AddCommonFlagsForAWS(rc.FlagSetGroup, rc.ProviderConfig, false)
 }
 
-func doEnableLogging(rc *cmdutils.ResourceCmd) error {
+func doEnableLogging(rc *cmdutils.ResourceCmd, logTypesToEnable *[]string) error {
+	enableTypes, err := processTypesToEnable(logTypesToEnable)
+	if err != nil {
+		return err
+	}
+	rc.ClusterConfig.AppendClusterCloudWatchLogTypes(enableTypes...)
+
 	if err := cmdutils.NewUtilsEnableLoggingLoader(rc).Load(); err != nil {
 		return err
 	}
@@ -143,4 +116,25 @@ func doEnableLogging(rc *cmdutils.ResourceCmd) error {
 	cmdutils.LogPlanModeWarning(rc.Plan && updateRequired)
 
 	return nil
+}
+
+func processTypesToEnable(typesEnabled *[]string) ([]string, error) {
+	if typesEnabled == nil || len(*typesEnabled) == 0 {
+		return []string{}, nil
+	}
+	if len(*typesEnabled) == 1 && (*typesEnabled)[0] == "all" {
+		return api.SupportedCloudWatchClusterLogTypes(), nil
+	}
+
+	allSupportedTypesSet := sets.NewString(api.SupportedCloudWatchClusterLogTypes()...)
+	typesToEnable := sets.NewString()
+	for _, logType := range *typesEnabled {
+
+		if !allSupportedTypesSet.Has(logType) {
+			return nil, fmt.Errorf("unknown log type %s. Supported log types: %s", logType, strings.Join(api.SupportedCloudWatchClusterLogTypes(), ", "))
+		}
+
+		typesToEnable.Insert(logType)
+	}
+	return typesToEnable.List(), nil
 }

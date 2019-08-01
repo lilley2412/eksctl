@@ -249,8 +249,7 @@ var _ = Describe("(Integration) Create, Get, Scale & Delete", func() {
 					eksctlSuccess("utils", "enable-logging",
 						"--name", clusterName,
 						"--region", region,
-						"--api",
-						"--controllerManager",
+						"--enable-types", "api,controllerManager",
 					)
 					enabled, disable, err := ctl.GetCurrentClusterConfigForLogging(cfg.Metadata)
 					Expect(err).ShouldNot(HaveOccurred())
@@ -263,8 +262,7 @@ var _ = Describe("(Integration) Create, Get, Scale & Delete", func() {
 						"--name", clusterName,
 						"--region", region,
 						"--approve",
-						"--api",
-						"--controllerManager",
+						"--enable-types", "api,controllerManager",
 					)
 					enabled, disable, err := ctl.GetCurrentClusterConfigForLogging(cfg.Metadata)
 					Expect(err).ShouldNot(HaveOccurred())
@@ -279,7 +277,7 @@ var _ = Describe("(Integration) Create, Get, Scale & Delete", func() {
 						"--name", clusterName,
 						"--region", region,
 						"--approve",
-						"--all",
+						"--enable-types", "all",
 					)
 					enabled, disable, err := ctl.GetCurrentClusterConfigForLogging(cfg.Metadata)
 					Expect(err).ShouldNot(HaveOccurred())
@@ -287,26 +285,12 @@ var _ = Describe("(Integration) Create, Get, Scale & Delete", func() {
 					Expect(disable.List()).To(HaveLen(0))
 				})
 
-				It("should enable all but one type", func() {
+				It("should disable all of the types with --enable-types flag with no values", func() {
 					eksctlSuccess("utils", "enable-logging",
 						"--name", clusterName,
 						"--region", region,
 						"--approve",
-						"--all",
-						"--controllerManager=false",
-					)
-					enabled, disable, err := ctl.GetCurrentClusterConfigForLogging(cfg.Metadata)
-					Expect(err).ShouldNot(HaveOccurred())
-					Expect(enabled.List()).To(HaveLen(4))
-					Expect(disable.List()).To(HaveLen(1))
-				})
-
-				It("should disable all of the types with --all=false flag", func() {
-					eksctlSuccess("utils", "enable-logging",
-						"--name", clusterName,
-						"--region", region,
-						"--approve",
-						"--all=false",
+						"--enable-types",
 					)
 					enabled, disable, err := ctl.GetCurrentClusterConfigForLogging(cfg.Metadata)
 					Expect(err).ShouldNot(HaveOccurred())
