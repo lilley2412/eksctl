@@ -102,6 +102,11 @@ ClusterStatus:
 ClusterSubnets:
   additionalProperties: false
   properties:
+    pod:
+      patternProperties:
+        .*:
+          $ref: '#/definitions/Network'
+      type: object
     private:
       patternProperties:
         .*:

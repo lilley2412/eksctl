@@ -22,6 +22,9 @@ type (
 		// private subnets or any ad-hoc subnets
 		// +optional
 		ExtraCIDRs []*ipnet.IPNet `json:"extraCIDRs,omitempty"`
+		// for CNI custom networking pod CIDR allocations
+		// +optional
+		// PodCIDRs []*ipnet.IPNet
 		// for pre-defined shared node SG
 		SharedNodeSecurityGroup string `json:"sharedNodeSecurityGroup,omitempty"`
 		// +optional
@@ -33,6 +36,7 @@ type (
 	ClusterSubnets struct {
 		Private map[string]Network `json:"private,omitempty"`
 		Public  map[string]Network `json:"public,omitempty"`
+		Pod     map[string]Network `json:"pod,omitempty"`
 	}
 	// SubnetTopology can be SubnetTopologyPrivate or SubnetTopologyPublic
 	SubnetTopology string
@@ -58,6 +62,8 @@ const (
 	SubnetTopologyPrivate SubnetTopology = "Private"
 	// SubnetTopologyPublic represents publicly-routed subnets
 	SubnetTopologyPublic SubnetTopology = "Public"
+	// SubnetTopologyPod represents CNI custom pod subnets
+	SubnetTopologyPod SubnetTopology = "Pod"
 )
 
 // SubnetTopologies returns a list of topologies
@@ -100,6 +106,17 @@ func (c *ClusterConfig) PublicSubnetIDs() []string {
 	return subnets
 }
 
+// PodSubnetIDs returns list of subnets
+func (c *ClusterConfig) PodSubnetIDs() []string {
+	subnets := []string{}
+	if c.VPC.Subnets != nil {
+		for _, s := range c.VPC.Subnets.Pod {
+			subnets = append(subnets, s.ID)
+		}
+	}
+	return subnets
+}
+
 // ImportSubnet loads a given subnet into cluster config
 func (c *ClusterConfig) ImportSubnet(topology SubnetTopology, az, subnetID, cidr string) error {
 	if c.VPC.Subnets == nil {
@@ -117,6 +134,11 @@ func (c *ClusterConfig) ImportSubnet(topology SubnetTopology, az, subnetID, cidr
 			c.VPC.Subnets.Public = make(map[string]Network)
 		}
 		return doImportSubnet(c.VPC.Subnets.Public, az, subnetID, cidr)
+	case SubnetTopologyPod:
+		if c.VPC.Subnets.Pod == nil {
+			c.VPC.Subnets.Pod = make(map[string]Network)
+		}
+		return doImportSubnet(c.VPC.Subnets.Pod, az, subnetID, cidr)
 	default:
 		return fmt.Errorf("unexpected subnet topology: %s", topology)
 	}
