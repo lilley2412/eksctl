@@ -1,11 +1,16 @@
 package builder
 
 import (
+	"fmt"
+
+	cfn "github.com/aws/aws-sdk-go/service/cloudformation"
 	gfn "github.com/awslabs/goformation/cloudformation"
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/cfn/outputs"
+	cft "github.com/weaveworks/eksctl/pkg/cfn/template"
 	"github.com/weaveworks/eksctl/pkg/iam"
+	iamoidc "github.com/weaveworks/eksctl/pkg/iam/oidc"
 )
 
 const (
@@ -26,30 +31,11 @@ var (
 	}
 )
 
-func makePolicyDocument(statement map[string]interface{}) map[string]interface{} {
-	return map[string]interface{}{
-		"Version": "2012-10-17",
-		"Statement": []interface{}{
-			statement,
-		},
-	}
-}
-
-func makeAssumeRolePolicyDocument(service string) map[string]interface{} {
-	return makePolicyDocument(map[string]interface{}{
-		"Effect": "Allow",
-		"Principal": map[string][]string{
-			"Service": []string{service},
-		},
-		"Action": []string{"sts:AssumeRole"},
-	})
-}
-
 func (c *resourceSet) attachAllowPolicy(name string, refRole *gfn.Value, resources interface{}, actions []string) {
 	c.newResource(name, &gfn.AWSIAMPolicy{
 		PolicyName: makeName(name),
 		Roles:      makeSlice(refRole),
-		PolicyDocument: makePolicyDocument(map[string]interface{}{
+		PolicyDocument: cft.MakePolicyDocument(map[string]interface{}{
 			"Effect":   "Allow",
 			"Resource": resources,
 			"Action":   actions,
@@ -70,7 +56,7 @@ func (c *ClusterResourceSet) WithNamedIAM() bool {
 func (c *ClusterResourceSet) addResourcesForIAM() {
 	c.rs.withNamedIAM = false
 
-	if c.spec.IAM.ServiceRoleARN != "" {
+	if api.IsSetAndNonEmptyString(c.spec.IAM.ServiceRoleARN) {
 		c.rs.withIAM = false
 		c.rs.defineOutputWithoutCollector(outputs.ClusterServiceRoleARN, c.spec.IAM.ServiceRoleARN, true)
 		return
@@ -79,7 +65,7 @@ func (c *ClusterResourceSet) addResourcesForIAM() {
 	c.rs.withIAM = true
 
 	refSR := c.newResource("ServiceRole", &gfn.AWSIAMRole{
-		AssumeRolePolicyDocument: makeAssumeRolePolicyDocument("eks.amazonaws.com"),
+		AssumeRolePolicyDocument: cft.MakeAssumeRolePolicyDocumentForServices("eks.amazonaws.com"),
 		ManagedPolicyArns: makeStringSlice(
 			iamPolicyAmazonEKSServicePolicyARN,
 			iamPolicyAmazonEKSClusterPolicyARN,
@@ -94,7 +80,7 @@ func (c *ClusterResourceSet) addResourcesForIAM() {
 		"cloudwatch:PutMetricData",
 	})
 	c.rs.defineOutputFromAtt(outputs.ClusterServiceRoleARN, "ServiceRole.Arn", true, func(v string) error {
-		c.spec.IAM.ServiceRoleARN = v
+		c.spec.IAM.ServiceRoleARN = &v
 		return nil
 	})
 }
@@ -172,8 +158,8 @@ func (n *NodeGroupResourceSet) addResourcesForIAM() {
 	}
 
 	role := gfn.AWSIAMRole{
-		Path:                     gfn.NewString("/"),
-		AssumeRolePolicyDocument: makeAssumeRolePolicyDocument("ec2.amazonaws.com"),
+		Path: gfn.NewString("/"),
+		AssumeRolePolicyDocument: cft.MakeAssumeRolePolicyDocumentForServices("ec2.amazonaws.com"),
 		ManagedPolicyArns:        makeStringSlice(n.spec.IAM.AttachPolicyARNs...),
 	}
 
@@ -234,7 +220,6 @@ func (n *NodeGroupResourceSet) addResourcesForIAM() {
 			},
 		)
 	}
-
 
 	if api.IsEnabled(n.spec.IAM.WithAddonPolicies.AppMesh) {
 		n.rs.attachAllowPolicy("PolicyAppMesh", refIR, "*",
@@ -387,4 +372,76 @@ func (n *NodeGroupResourceSet) addResourcesForIAM() {
 		n.spec.IAM.InstanceRoleARN = v
 		return nil
 	})
+}
+
+// IAMServiceAccountResourceSet holds iamserviceaccount stack build-time information
+type IAMServiceAccountResourceSet struct {
+	template *cft.Template
+	spec     *api.ClusterIAMServiceAccount
+	oidc     *iamoidc.OpenIDConnectManager
+	outputs  *outputs.CollectorSet
+}
+
+// NewIAMServiceAccountResourceSet builds iamserviceaccount stack from the give spec
+func NewIAMServiceAccountResourceSet(spec *api.ClusterIAMServiceAccount, oidc *iamoidc.OpenIDConnectManager) *IAMServiceAccountResourceSet {
+	return &IAMServiceAccountResourceSet{
+		template: cft.NewTemplate(),
+		spec:     spec,
+		oidc:     oidc,
+	}
+}
+
+// WithIAM returns true
+func (*IAMServiceAccountResourceSet) WithIAM() bool { return true }
+
+// WithNamedIAM returns false
+func (*IAMServiceAccountResourceSet) WithNamedIAM() bool { return false }
+
+// AddAllResources adds all resources for the stack
+func (rs *IAMServiceAccountResourceSet) AddAllResources() error {
+	rs.template.Description = fmt.Sprintf(
+		"IAM role for serviceaccount %q %s",
+		rs.spec.NameString(),
+		templateDescriptionSuffix,
+	)
+
+	// we use a single stack for each service account, but there maybe a few roles in it
+	// so will need to give them unique names
+	// we will need to consider using a large stack for all the roles, but that needs some
+	// testing and potentially a better stack mutation strategy
+	role := &cft.IAMRole{
+		AssumeRolePolicyDocument: rs.oidc.MakeAssumeRolePolicyDocument(rs.spec.Namespace, rs.spec.Name),
+	}
+	role.ManagedPolicyArns = append(role.ManagedPolicyArns, rs.spec.AttachPolicyARNs...)
+
+	roleRef := rs.template.NewResource("Role1", role)
+
+	// TODO: declare output collector automatically when all stack builders migrated to our template package
+	rs.template.Outputs["Role1"] = cft.Output{
+		Value: cft.MakeFnGetAttString("Role1.Arn"),
+	}
+	rs.outputs = outputs.NewCollectorSet(map[string]outputs.Collector{
+		"Role1": func(v string) error {
+			rs.spec.Status = &api.ClusterIAMServiceAccountStatus{
+				RoleARN: &v,
+			}
+			return nil
+		},
+	})
+
+	if len(rs.spec.AttachPolicy) != 0 {
+		rs.template.AttachPolicy("Policy1", roleRef, cft.MapOfInterfaces(rs.spec.AttachPolicy))
+	}
+
+	return nil
+}
+
+// RenderJSON will render iamserviceaccount stack as JSON
+func (rs *IAMServiceAccountResourceSet) RenderJSON() ([]byte, error) {
+	return rs.template.RenderJSON()
+}
+
+// GetAllOutputs will get all outputs from iamserviceaccount stack
+func (rs *IAMServiceAccountResourceSet) GetAllOutputs(stack cfn.Stack) error {
+	return rs.outputs.MustCollect(stack)
 }

@@ -27,18 +27,14 @@ vpc:
       us-east-1a:
           id: "subnet-11113"
           cidr: "152.28.136.0/21"
-iam: 
+iam:
   serviceRoleARN: "arn:aws:iam::11111:role/eks-base-service-role"
 
 nodeGroups:
-  - name: my-test-m5-private
-    labels: {pool: my-test-m5-private}
+  - name: ng-1
+
     instanceType: m5.large
     desiredCapacity: 3
-    minSize: 1
-    maxSize: 15
-    volumeSize: 50
-    volumeType: gp2
     iam:
       instanceProfileARN: "arn:aws:iam::11111:instance-profile/eks-nodes-base-role"
       instanceRoleARN: "arn:aws:iam::1111:role/eks-nodes-base-role"
@@ -47,8 +43,8 @@ nodeGroups:
       withShared: true
       withLocal: true
       attachIDs: ['sg-11111', 'sg-11112']
-    allowSSH: true
-    sshPublicKeyName: 'my-instance-key'
+    ssh:
+      publicKeyName: 'my-instance-key'
     tags:
       'environment:basedomain': 'example.org'
 ```

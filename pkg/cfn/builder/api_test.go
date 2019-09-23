@@ -112,6 +112,7 @@ type LaunchTemplateData struct {
 	IamInstanceProfile              struct{ Arn interface{} }
 	UserData, InstanceType, ImageId string
 	BlockDeviceMappings             []interface{}
+	EbsOptimized                    *bool
 	NetworkInterfaces               []struct {
 		DeviceIndex              int
 		AssociatePublicIpAddress bool
@@ -390,8 +391,8 @@ var _ = Describe("CloudFormation template builder API", func() {
 			},
 			AvailabilityZones: testAZs,
 			VPC:               testVPC(),
-			IAM: api.ClusterIAM{
-				ServiceRoleARN: arn,
+			IAM: &api.ClusterIAM{
+				ServiceRoleARN: aws.String(arn),
 			},
 			CloudWatch: &api.ClusterCloudWatch{
 				ClusterLogging: &api.ClusterCloudWatchLogging{},
@@ -1550,6 +1551,48 @@ var _ = Describe("CloudFormation template builder API", func() {
 		})
 	})
 
+	Context("NodeGroup{EBSOptimized=nil}", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		build(cfg, "eksctl-test-ebs-optimized", ng)
+
+		roundtrip()
+
+		It("should have correct instance type and sizes", func() {
+			Expect(getLaunchTemplateData(ngTemplate).EbsOptimized).To(BeNil())
+		})
+	})
+
+	Context("NodeGroup{EBSOptimized=false}", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		ng.EBSOptimized = api.Disabled()
+
+		build(cfg, "eksctl-test-ebs-optimized", ng)
+
+		roundtrip()
+
+		It("should have correct instance type and sizes", func() {
+			Expect(getLaunchTemplateData(ngTemplate).EbsOptimized).ToNot(BeNil())
+			Expect(*getLaunchTemplateData(ngTemplate).EbsOptimized).To(BeFalse())
+		})
+	})
+
+	Context("NodeGroup{EBSOptimized=true}", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		ng.EBSOptimized = api.Enabled()
+
+		build(cfg, "eksctl-test-ebs-optimized", ng)
+
+		roundtrip()
+
+		It("should have correct instance type and sizes", func() {
+			Expect(getLaunchTemplateData(ngTemplate).EbsOptimized).ToNot(BeNil())
+			Expect(*getLaunchTemplateData(ngTemplate).EbsOptimized).To(BeTrue())
+		})
+	})
+
 	checkAsset := func(name, expectedContent string) {
 		assetContent, err := nodebootstrap.Asset(name)
 		Expect(err).ToNot(HaveOccurred())
@@ -1860,6 +1903,19 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(kubeconfig.Permissions).To(Equal("0644"))
 			Expect(kubeconfig.Content).To(MatchYAML(kubeconfigBody("heptio-authenticator-aws")))
 
+			kubeletConfigAssetContent, err := nodebootstrap.Asset("kubelet.yaml")
+			Expect(err).ToNot(HaveOccurred())
+
+			kubeletConfigAssetContentString := string(kubeletConfigAssetContent) +
+				"\n" +
+				"clusterDNS: [172.20.0.10]\n"
+
+			kubeletConfig := getFile(cc, "/etc/eksctl/kubelet.yaml")
+			Expect(kubeletConfig).ToNot(BeNil())
+			Expect(kubeletConfig.Permissions).To(Equal("0644"))
+
+			Expect(kubeletConfig.Content).To(MatchYAML(kubeletConfigAssetContentString))
+
 			ca := getFile(cc, "/etc/eksctl/ca.crt")
 			Expect(ca).ToNot(BeNil())
 			Expect(ca.Permissions).To(Equal("0644"))
@@ -2065,7 +2121,11 @@ var _ = Describe("CloudFormation template builder API", func() {
 
 		cfg.Metadata.Name = "test-1"
 
-		cfg.IAM.ServiceRoleARN = "role-1"
+		role1 := "role-1"
+
+		cfg.IAM = &api.ClusterIAM{
+			ServiceRoleARN: &role1,
+		}
 
 		build(cfg, "eksctl-test-1-cluster", ng)
 
@@ -2079,7 +2139,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 
 			Expect(cp.Name).To(Equal(cfg.Metadata.Name))
 
-			Expect(cp.RoleArn).To(Equal("role-1"))
+			Expect(cp.RoleArn).To(Equal(role1))
 
 			Expect(cp.ResourcesVpcConfig.SecurityGroupIds).To(HaveLen(1))
 			Expect(cp.ResourcesVpcConfig.SecurityGroupIds[0]).To(Equal(cfg.VPC.SecurityGroup))

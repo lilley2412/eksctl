@@ -22,9 +22,8 @@ const (
 	KubeDNS = "kube-dns"
 
 	coreDNSImagePrefixPTN = "%s.dkr.ecr."
-	coreDNSImageSuffix = ".amazonaws.com/eks/coredns"
+	coreDNSImageSuffix    = ".amazonaws.com/eks/coredns"
 )
-
 
 // UpdateCoreDNS will update the `coredns` add-on
 func UpdateCoreDNS(rawClient kubernetes.RawClientInterface, region, controlPlaneVersion string, plan bool) (bool, error) {
@@ -92,18 +91,15 @@ func UpdateCoreDNS(rawClient kubernetes.RawClientInterface, region, controlPlane
 }
 
 func loadAssetCoreDNS(controlPlaneVersion string) (*metav1.List, error) {
-	assetName := CoreDNS
 	if strings.HasPrefix(controlPlaneVersion, "1.10.") {
-		return nil, fmt.Errorf("CoreDNS is not supported on Kubernetes 1.10")
+		return nil, errors.New("CoreDNS is not supported on Kubernetes 1.10")
 	}
-	if strings.HasPrefix(controlPlaneVersion, "1.11.") {
-		assetName += "-1.11"
+
+	for _, version := range api.SupportedVersions() {
+		if strings.HasPrefix(controlPlaneVersion, version+".") {
+			return LoadAsset(fmt.Sprintf("%s-%s", CoreDNS, version), "json")
+		}
 	}
-	if strings.HasPrefix(controlPlaneVersion, "1.12.") {
-		assetName += "-1.12"
-	}
-	if strings.HasPrefix(controlPlaneVersion, "1.13.") {
-		assetName += "-1.13"
-	}
-	return LoadAsset(assetName, "json")
+
+	return nil, errors.New("unsupported Kubernetes version")
 }

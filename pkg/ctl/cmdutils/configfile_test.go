@@ -9,7 +9,6 @@ import (
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	. "github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
-	// "github.com/weaveworks/eksctl/pkg/printers"
 )
 
 var _ = Describe("cmdutils configfile", func() {
@@ -29,47 +28,49 @@ var _ = Describe("cmdutils configfile", func() {
 			cfg := api.NewClusterConfig()
 
 			{
-				rc := &ResourceCmd{
+				cmd := &Cmd{
 					ClusterConfig: cfg,
 					NameArg:       "foo-1",
+					CobraCommand:  newCmd(),
 				}
 
-				err := NewMetadataLoader(rc).Load()
+				err := NewMetadataLoader(cmd).Load()
 				Expect(err).ToNot(HaveOccurred())
 				Expect(cfg.Metadata.Name).To(Equal("foo-1"))
 			}
 
 			{
-				rc := &ResourceCmd{
+				cmd := &Cmd{
 					ClusterConfig: cfg,
 					NameArg:       "foo-2",
+					CobraCommand:  newCmd(),
 				}
 
-				err := NewMetadataLoader(rc).Load()
+				err := NewMetadataLoader(cmd).Load()
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(Equal("--name=foo-1 and argument foo-2 cannot be used at the same time"))
 			}
 
 			{
-				rc := &ResourceCmd{
+				cmd := &Cmd{
 					ClusterConfig:     cfg,
 					NameArg:           "foo-3",
-					Command:           newCmd(),
+					CobraCommand:      newCmd(),
 					ClusterConfigFile: examplesDir + "01-simple-cluster.yaml",
 				}
 
-				err := NewMetadataLoader(rc).Load()
+				err := NewMetadataLoader(cmd).Load()
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(Equal(ErrCannotUseWithConfigFile(`name argument "foo-3"`).Error()))
 
-				fs := rc.Command.Flags()
+				fs := cmd.CobraCommand.Flags()
 
 				fs.StringVar(&cfg.Metadata.Name, "name", "", "")
-				rc.Command.Flag("name").Changed = true
+				cmd.CobraCommand.Flag("name").Changed = true
 
-				Expect(rc.Command.Flag("name").Changed).To(BeTrue())
+				Expect(cmd.CobraCommand.Flag("name").Changed).To(BeTrue())
 
-				err = NewMetadataLoader(rc).Load()
+				err = NewMetadataLoader(cmd).Load()
 
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(Equal(ErrCannotUseWithConfigFile("--name").Error()))
@@ -80,22 +81,22 @@ var _ = Describe("cmdutils configfile", func() {
 			examples, err := filepath.Glob(examplesDir + "*.yaml")
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(examples).To(HaveLen(11))
+			Expect(examples).To(HaveLen(13))
 			for _, example := range examples {
-				rc := &ResourceCmd{
-					Command:           newCmd(),
+				cmd := &Cmd{
+					CobraCommand:      newCmd(),
 					ClusterConfigFile: example,
 					ClusterConfig:     api.NewClusterConfig(),
 					ProviderConfig:    &api.ProviderConfig{},
 				}
 
-				err := NewMetadataLoader(rc).Load()
+				err := NewMetadataLoader(cmd).Load()
 
-				cfg := rc.ClusterConfig
+				cfg := cmd.ClusterConfig
 				Expect(err).ToNot(HaveOccurred())
 				Expect(cfg.Metadata.Name).ToNot(BeEmpty())
 				Expect(cfg.Metadata.Region).ToNot(BeEmpty())
-				Expect(cfg.Metadata.Region).To(Equal(rc.ProviderConfig.Region))
+				Expect(cfg.Metadata.Region).To(Equal(cmd.ProviderConfig.Region))
 				Expect(cfg.Metadata.Version).To(BeEmpty())
 			}
 		})
@@ -116,18 +117,102 @@ var _ = Describe("cmdutils configfile", func() {
 			}
 
 			for _, natTest := range natTests {
-				rc := &ResourceCmd{
-					Command:           newCmd(),
+				cmd := &Cmd{
+					CobraCommand:      newCmd(),
 					ClusterConfigFile: filepath.Join(examplesDir, natTest.configFile),
 					ClusterConfig:     api.NewClusterConfig(),
 					ProviderConfig:    &api.ProviderConfig{},
 				}
 
-				Expect(NewCreateClusterLoader(rc, nil).Load()).To(Succeed())
-				cfg := rc.ClusterConfig
+				Expect(NewCreateClusterLoader(cmd, NewNodeGroupFilter(), nil, true).Load()).To(Succeed())
+				cfg := cmd.ClusterConfig
 				Expect(cfg.VPC.NAT.Gateway).To(Not(BeNil()))
 				Expect(*cfg.VPC.NAT.Gateway).To(Equal(natTest.expectedGateway))
 			}
+		})
+
+		It("loader should handle named and unnamed nodegroups without config file", func() {
+			unnamedNG := api.NewNodeGroup()
+
+			namedNG := api.NewNodeGroup()
+			namedNG.Name = "ng-1"
+
+			loaderParams := []struct {
+				ng               *api.NodeGroup
+				withoutNodeGroup bool
+			}{
+				{unnamedNG, false},
+				{unnamedNG, true},
+				{namedNG, false},
+				{namedNG, false},
+			}
+
+			for _, loaderTest := range loaderParams {
+				cmd := &Cmd{
+					CobraCommand:   newCmd(),
+					ClusterConfig:  api.NewClusterConfig(),
+					ProviderConfig: &api.ProviderConfig{},
+				}
+
+				ngFilter := NewNodeGroupFilter()
+
+				Expect(cmd.ClusterConfig.NodeGroups).To(HaveLen(0))
+
+				Expect(NewCreateClusterLoader(cmd, ngFilter, loaderTest.ng, loaderTest.withoutNodeGroup).Load()).To(Succeed())
+
+				Expect(ngFilter.ExcludeAll).To(Equal(loaderTest.withoutNodeGroup))
+
+				if loaderTest.withoutNodeGroup {
+					Expect(cmd.ClusterConfig.NodeGroups).To(HaveLen(0))
+				}
+				if !loaderTest.withoutNodeGroup {
+					Expect(cmd.ClusterConfig.NodeGroups).To(HaveLen(1))
+					Expect(cmd.ClusterConfig.NodeGroups[0]).To(Equal(loaderTest.ng))
+				}
+
+				_, err := cmd.NewCtl()
+				Expect(err).ToNot(HaveOccurred())
+			}
+		})
+
+		It("loader should handle nodegroup exclusion with config file", func() {
+			loaderParams := []struct {
+				configFile       string
+				nodeGroupCount   int
+				withoutNodeGroup bool
+			}{
+				{"01-simple-cluster.yaml", 1, true},
+				{"01-simple-cluster.yaml", 1, false},
+				{"02-custom-vpc-cidr-no-nodes.yaml", 0, true},
+				{"02-custom-vpc-cidr-no-nodes.yaml", 0, true},
+				{"03-two-nodegroups.yaml", 2, true},
+				{"03-two-nodegroups.yaml", 2, false},
+				{"05-advanced-nodegroups.yaml", 3, true},
+				{"05-advanced-nodegroups.yaml", 3, false},
+				{"07-ssh-keys.yaml", 5, true},
+				{"07-ssh-keys.yaml", 5, false},
+			}
+
+			for _, loaderTest := range loaderParams {
+				cmd := &Cmd{
+					CobraCommand:      newCmd(),
+					ClusterConfigFile: filepath.Join(examplesDir, loaderTest.configFile),
+					ClusterConfig:     api.NewClusterConfig(),
+					ProviderConfig:    &api.ProviderConfig{},
+				}
+
+				ngFilter := NewNodeGroupFilter()
+
+				Expect(NewCreateClusterLoader(cmd, ngFilter, nil, loaderTest.withoutNodeGroup).Load()).To(Succeed())
+
+				Expect(ngFilter.ExcludeAll).To(Equal(loaderTest.withoutNodeGroup))
+
+				Expect(cmd.ClusterConfig.NodeGroups).To(HaveLen(loaderTest.nodeGroupCount))
+
+				_, err := cmd.NewCtl()
+				Expect(err).ToNot(HaveOccurred())
+			}
+
 		})
 	})
 })

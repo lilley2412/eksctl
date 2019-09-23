@@ -65,6 +65,9 @@ const (
 	// RegionAPEast1 represents the Asia Pacific Region Hong Kong
 	RegionAPEast1 = "ap-east-1"
 
+	// RegionMESouth1 represents the Middle East Region Bahrain
+	RegionMESouth1 = "me-south-1"
+
 	// DefaultRegion defines the default region, where to deploy the EKS cluster
 	DefaultRegion = RegionUSWest2
 
@@ -80,11 +83,14 @@ const (
 	// Version1_13 represents Kubernetes version 1.13.x
 	Version1_13 = "1.13"
 
+	// Version1_14 represents Kubernetes version 1.14.x
+	Version1_14 = "1.14"
+
 	// DefaultVersion represents default Kubernetes version supported by EKS
 	DefaultVersion = Version1_13
 
 	// LatestVersion represents latest Kubernetes version supported by EKS
-	LatestVersion = Version1_13
+	LatestVersion = Version1_14
 
 	// DefaultNodeType is the default instance type to use for nodes
 	DefaultNodeType = "m5.large"
@@ -118,19 +124,22 @@ const (
 	// OldClusterNameTag defines the tag of the cluster name
 	OldClusterNameTag = "eksctl.cluster.k8s.io/v1alpha1/cluster-name"
 
-	// NodeGroupNameTag defines the tag of the node group name
+	// NodeGroupNameTag defines the tag of the nodegroup name
 	NodeGroupNameTag = "alpha.eksctl.io/nodegroup-name"
 
-	// OldNodeGroupNameTag defines the tag of the node group name
+	// OldNodeGroupNameTag defines the tag of the nodegroup name
 	OldNodeGroupNameTag = "eksctl.io/v1alpha2/nodegroup-name"
 
-	// OldNodeGroupIDTag defines the old version of tag of the node group name
+	// OldNodeGroupIDTag defines the old version of tag of the nodegroup name
 	OldNodeGroupIDTag = "eksctl.cluster.k8s.io/v1alpha1/nodegroup-id"
+
+	// IAMServiceAccountNameTag defines the tag of the iamserviceaccount name
+	IAMServiceAccountNameTag = "alpha.eksctl.io/iamserviceaccount-name"
 
 	// ClusterNameLabel defines the tag of the cluster name
 	ClusterNameLabel = "alpha.eksctl.io/cluster-name"
 
-	// NodeGroupNameLabel defines the label of the node group name
+	// NodeGroupNameLabel defines the label of the nodegroup name
 	NodeGroupNameLabel = "alpha.eksctl.io/nodegroup-name"
 
 	// ClusterHighlyAvailableNAT defines the highly available NAT configuration option
@@ -142,12 +151,15 @@ const (
 	// ClusterDisableNAT defines the disabled NAT configuration option
 	ClusterDisableNAT = "Disable"
 
-	// eksResourceAccountStandard defines the eks aws accountID that provides node resources in default regions
-	// for standard aws partition.
+	// eksResourceAccountStandard defines the AWS EKS account ID that provides node resources in default regions
+	// for standard AWS partition
 	eksResourceAccountStandard = "602401143452"
 
-	// eksResourceAccountAPEast1 defines the eks aws accountID that provides node resources in ap-east-1 region.
+	// eksResourceAccountAPEast1 defines the AWS EKS account ID that provides node resources in ap-east-1 region
 	eksResourceAccountAPEast1 = "800184023465"
+
+	// eksResourceAccountMESouth1 defines the AWS EKS account ID that provides node resources in me-south-1 region
+	eksResourceAccountMESouth1 = "558608220178"
 )
 
 var (
@@ -205,6 +217,7 @@ func SupportedRegions() []string {
 		RegionAPSouthEast2,
 		RegionAPSouth1,
 		RegionAPEast1,
+		RegionMESouth1,
 	}
 }
 
@@ -223,6 +236,7 @@ func SupportedVersions() []string {
 		Version1_11,
 		Version1_12,
 		Version1_13,
+		Version1_14,
 	}
 }
 
@@ -242,6 +256,8 @@ func EKSResourceAccountID(region string) string {
 	switch region {
 	case RegionAPEast1:
 		return eksResourceAccountAPEast1
+	case RegionMESouth1:
+		return eksResourceAccountMESouth1
 	default:
 		return eksResourceAccountStandard
 	}
@@ -310,7 +326,7 @@ type ClusterConfig struct {
 	Metadata *ClusterMeta `json:"metadata"`
 
 	// +optional
-	IAM ClusterIAM `json:"iam"`
+	IAM *ClusterIAM `json:"iam,omitempty"`
 
 	// +optional
 	VPC *ClusterVPC `json:"vpc,omitempty"`
@@ -354,6 +370,7 @@ func NewClusterConfig() *ClusterConfig {
 		Metadata: &ClusterMeta{
 			Version: DefaultVersion,
 		},
+		IAM: &ClusterIAM{},
 		VPC: NewClusterVPC(),
 		CloudWatch: &ClusterCloudWatch{
 			ClusterLogging: &ClusterCloudWatchLogging{},
@@ -366,13 +383,12 @@ func NewClusterConfig() *ClusterConfig {
 // NewClusterVPC creates new VPC config for a cluster
 func NewClusterVPC() *ClusterVPC {
 	cidr := DefaultCIDR()
-	nat := DefaultClusterNAT()
 
 	return &ClusterVPC{
 		Network: Network{
 			CIDR: &cidr,
 		},
-		NAT:              nat,
+		NAT:              DefaultClusterNAT(),
 		AutoAllocateIPv6: Disabled(),
 	}
 }
@@ -387,11 +403,9 @@ func (c *ClusterConfig) AppendAvailabilityZone(newAZ string) {
 	c.AvailabilityZones = append(c.AvailabilityZones, newAZ)
 }
 
-// NewNodeGroup creates new nodegroup inside cluster config,
-// it returns pointer to the nodegroup for convenience
-func (c *ClusterConfig) NewNodeGroup() *NodeGroup {
-
-	ng := &NodeGroup{
+// NewNodeGroup creates new nodegroup, and returns pointer to it
+func NewNodeGroup() *NodeGroup {
+	return &NodeGroup{
 		PrivateNetworking: false,
 		SecurityGroups: &NodeGroupSGs{
 			AttachIDs:  []string{},
@@ -422,16 +436,16 @@ func (c *ClusterConfig) NewNodeGroup() *NodeGroup {
 			PublicKeyPath: &DefaultNodeSSHPublicKeyPath,
 		},
 	}
+}
+
+// NewNodeGroup creates new nodegroup inside cluster config,
+// it returns pointer to the nodegroup for convenience
+func (c *ClusterConfig) NewNodeGroup() *NodeGroup {
+	ng := NewNodeGroup()
 
 	c.NodeGroups = append(c.NodeGroups, ng)
 
 	return ng
-}
-
-// ClusterIAM holds all IAM attributes of a cluster
-type ClusterIAM struct {
-	// +optional
-	ServiceRoleARN string `json:"serviceRoleARN,omitempty"`
 }
 
 // NodeGroup holds all configuration attributes that are
@@ -462,6 +476,9 @@ type NodeGroup struct {
 	MinSize *int `json:"minSize,omitempty"`
 	// +optional
 	MaxSize *int `json:"maxSize,omitempty"`
+
+	// +optional
+	EBSOptimized *bool `json:"ebsOptimized,omitempty"`
 
 	// +optional
 	VolumeSize *int `json:"volumeSize"`
@@ -503,7 +520,7 @@ type NodeGroup struct {
 	ClusterDNS string `json:"clusterDNS,omitempty"`
 
 	// +optional
-	KubeletExtraConfig *NodeGroupKubeletConfig `json:"kubeletExtraConfig,omitempty"`
+	KubeletExtraConfig *InlineDocument `json:"kubeletExtraConfig,omitempty"`
 }
 
 // ListOptions returns metav1.ListOptions with label selector for the nodegroup
@@ -511,6 +528,11 @@ func (n *NodeGroup) ListOptions() metav1.ListOptions {
 	return metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", NodeGroupNameLabel, n.Name),
 	}
+}
+
+// NameString returns common name string
+func (n *NodeGroup) NameString() string {
+	return n.Name
 }
 
 type (
@@ -589,16 +611,16 @@ type (
 	}
 )
 
-// NodeGroupKubeletConfig contains extra config parameters for the kubelet.yaml
-type NodeGroupKubeletConfig map[string]interface{}
+// InlineDocument holds any arbitrary JSON/YAML documents, such as extra config parameters or IAM policies
+type InlineDocument map[string]interface{}
 
-// DeepCopy is needed to generate kubernetes types for NodeGroupKubeletConfig
-func (in *NodeGroupKubeletConfig) DeepCopy() *NodeGroupKubeletConfig {
+// DeepCopy is needed to generate kubernetes types for InlineDocument
+func (in *InlineDocument) DeepCopy() *InlineDocument {
 	if in == nil {
 		return nil
 	}
-	out := new(NodeGroupKubeletConfig)
-	*out = NodeGroupKubeletConfig(runtime.DeepCopyJSON(*in))
+	out := new(InlineDocument)
+	*out = InlineDocument(runtime.DeepCopyJSON(*in))
 	return out
 }
 

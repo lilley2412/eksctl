@@ -4,51 +4,27 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kris-nova/logger"
-	"github.com/pkg/errors"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/request"
 	awseks "github.com/aws/aws-sdk-go/service/eks"
-
+	"github.com/kris-nova/logger"
+	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
-	"github.com/weaveworks/eksctl/pkg/cfn/manager"
 	"github.com/weaveworks/eksctl/pkg/utils/waiters"
 )
 
-type updateClusterConfigTask struct {
-	info string
-	skip bool
-	spec *api.ClusterConfig
-	call func(*api.ClusterConfig) error
-}
-
-func (t *updateClusterConfigTask) Skip() bool { return t.skip }
-func (t *updateClusterConfigTask) Describe() string {
-	if t.skip {
-		return "(skip) " + t.info
-	}
-	return t.info
-}
-func (t *updateClusterConfigTask) Do(errs chan error) error {
-	err := t.call(t.spec)
-	close(errs)
-	return err
-}
-
 // GetCurrentClusterConfigForLogging fetches current cluster logging configuration as two sets - enabled and disabled types
-func (c *ClusterProvider) GetCurrentClusterConfigForLogging(cl *api.ClusterMeta) (sets.String, sets.String, error) {
+func (c *ClusterProvider) GetCurrentClusterConfigForLogging(spec *api.ClusterConfig) (sets.String, sets.String, error) {
 	enabled := sets.NewString()
 	disabled := sets.NewString()
 
-	cluster, err := c.DescribeControlPlaneMustBeActive(cl)
-	if err != nil {
+	if ok, err := c.CanOperate(spec); !ok {
 		return nil, nil, errors.Wrap(err, "unable to retrieve current cluster logging configuration")
 	}
 
-	for _, logTypeGroup := range cluster.Logging.ClusterLogging {
+	for _, logTypeGroup := range c.Status.clusterInfo.cluster.Logging.ClusterLogging {
 		for _, logType := range logTypeGroup.Types {
 			if logType == nil {
 				return nil, nil, fmt.Errorf("unexpected response from EKS API - nil string")
@@ -113,21 +89,6 @@ func (c *ClusterProvider) UpdateClusterConfigForLogging(cfg *api.ClusterConfig) 
 		cfg.Metadata.Name, cfg.Metadata.Region, describeEnabledTypes, describeDisabledTypes,
 	)
 	return nil
-}
-
-// GetUpdateClusterConfigTasks returns all tasks for updating cluster configuration or nil if there are no tasks
-func (c *ClusterProvider) GetUpdateClusterConfigTasks(cfg *api.ClusterConfig) *manager.TaskTree {
-	if !cfg.HasClusterCloudWatchLogging() {
-		logger.Info("CloudWatch logging will not be enabled for cluster %q in %q", cfg.Metadata.Name, cfg.Metadata.Region)
-		logger.Info("you can enable it with 'eksctl utils update-cluster-logging --region=%s --name=%s'", cfg.Metadata.Region, cfg.Metadata.Name)
-		return nil
-	}
-
-	loggingTasks := &manager.TaskTree{Parallel: false}
-	loggingTasks.Append(&updateClusterConfigTask{
-		info: "update CloudWatch logging configuration",
-	})
-	return loggingTasks
 }
 
 // UpdateClusterVersion calls eks.UpdateClusterVersion and updates to cfg.Metadata.Version,

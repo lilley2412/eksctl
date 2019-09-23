@@ -10,43 +10,46 @@ import (
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/authconfigmap"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
-	"github.com/weaveworks/eksctl/pkg/eks"
 	"github.com/weaveworks/eksctl/pkg/printers"
 )
 
-func getIAMIdentityMappingCmd(rc *cmdutils.ResourceCmd) {
+func getIAMIdentityMappingCmd(cmd *cmdutils.Cmd) {
 	cfg := api.NewClusterConfig()
-	rc.ClusterConfig = cfg
+	cmd.ClusterConfig = cfg
 
 	var role string
 
 	params := &getCmdParams{}
 
-	rc.SetDescription("iamidentitymapping", "Get IAM identity mapping(s)", "")
+	cmd.SetDescription("iamidentitymapping", "Get IAM identity mapping(s)", "")
 
-	rc.SetRunFunc(func() error {
-		return doGetIAMIdentityMapping(rc, params, role)
+	cmd.SetRunFunc(func() error {
+		return doGetIAMIdentityMapping(cmd, params, role)
 	})
 
-	rc.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
 		fs.StringVar(&role, "role", "", "ARN of the IAM role")
 		cmdutils.AddNameFlag(fs, cfg.Metadata)
-		cmdutils.AddRegionFlag(fs, rc.ProviderConfig)
+		cmdutils.AddRegionFlag(fs, cmd.ProviderConfig)
 		cmdutils.AddCommonFlagsForGetCmd(fs, &params.chunkSize, &params.output)
-		cmdutils.AddConfigFileFlag(fs, &rc.ClusterConfigFile)
+		cmdutils.AddConfigFileFlag(fs, &cmd.ClusterConfigFile)
+		cmdutils.AddTimeoutFlag(fs, &cmd.ProviderConfig.WaitTimeout)
 	})
 
-	cmdutils.AddCommonFlagsForAWS(rc.FlagSetGroup, rc.ProviderConfig, false)
+	cmdutils.AddCommonFlagsForAWS(cmd.FlagSetGroup, cmd.ProviderConfig, false)
 }
 
-func doGetIAMIdentityMapping(rc *cmdutils.ResourceCmd, params *getCmdParams, role string) error {
-	if err := cmdutils.NewMetadataLoader(rc).Load(); err != nil {
+func doGetIAMIdentityMapping(cmd *cmdutils.Cmd, params *getCmdParams, role string) error {
+	if err := cmdutils.NewMetadataLoader(cmd).Load(); err != nil {
 		return err
 	}
 
-	cfg := rc.ClusterConfig
+	cfg := cmd.ClusterConfig
 
-	ctl := eks.New(rc.ProviderConfig, cfg)
+	ctl, err := cmd.NewCtl()
+	if err != nil {
+		return err
+	}
 
 	if err := ctl.CheckAuth(); err != nil {
 		return err
@@ -56,7 +59,7 @@ func doGetIAMIdentityMapping(rc *cmdutils.ResourceCmd, params *getCmdParams, rol
 		return cmdutils.ErrMustBeSet("--name")
 	}
 
-	if err := ctl.RefreshClusterConfig(cfg); err != nil {
+	if ok, err := ctl.CanOperate(cfg); !ok {
 		return err
 	}
 	clientSet, err := ctl.NewStdClientSet(cfg)

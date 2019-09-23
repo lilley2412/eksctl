@@ -21,23 +21,34 @@ type ClusterConfigLoader interface {
 }
 
 type commonClusterConfigLoader struct {
-	*ResourceCmd
+	*Cmd
 
 	flagsIncompatibleWithConfigFile, flagsIncompatibleWithoutConfigFile sets.String
 
 	validateWithConfigFile, validateWithoutConfigFile func() error
 }
 
-func newCommonClusterConfigLoader(rc *ResourceCmd) *commonClusterConfigLoader {
+func newCommonClusterConfigLoader(cmd *Cmd) *commonClusterConfigLoader {
 	nilValidatorFunc := func() error { return nil }
 
 	return &commonClusterConfigLoader{
-		ResourceCmd: rc,
+		Cmd: cmd,
 
-		validateWithConfigFile:             nilValidatorFunc,
-		flagsIncompatibleWithConfigFile:    sets.NewString("name", "region", "version"),
-		validateWithoutConfigFile:          nilValidatorFunc,
-		flagsIncompatibleWithoutConfigFile: sets.NewString(),
+		validateWithConfigFile: nilValidatorFunc,
+		flagsIncompatibleWithConfigFile: sets.NewString(
+			"name",
+			"region",
+			"version",
+			"cluster",
+			"namepace",
+		),
+		validateWithoutConfigFile: nilValidatorFunc,
+		flagsIncompatibleWithoutConfigFile: sets.NewString(
+			"only",
+			"include",
+			"exclude",
+			"only-missing",
+		),
 	}
 }
 
@@ -49,7 +60,7 @@ func (l *commonClusterConfigLoader) Load() error {
 
 	if l.ClusterConfigFile == "" {
 		for f := range l.flagsIncompatibleWithoutConfigFile {
-			if flag := l.Command.Flag(f); flag != nil && flag.Changed {
+			if flag := l.CobraCommand.Flag(f); flag != nil && flag.Changed {
 				return fmt.Errorf("cannot use --%s unless a config file is specified via --config-file/-f", f)
 			}
 		}
@@ -58,9 +69,9 @@ func (l *commonClusterConfigLoader) Load() error {
 
 	var err error
 
-	// The reference to ResourceCmd.ClusterConfig should only be reassigned if ClusterConfigFile is specified
+	// The reference to ClusterConfig should only be reassigned if ClusterConfigFile is specified
 	// because other parts of the code store the pointer locally and access it directly instead of via
-	// the ResourceCmd reference
+	// the Cmd reference
 	if l.ClusterConfig, err = eks.LoadConfigFromFile(l.ClusterConfigFile); err != nil {
 		return err
 	}
@@ -71,7 +82,7 @@ func (l *commonClusterConfigLoader) Load() error {
 	}
 
 	for f := range l.flagsIncompatibleWithConfigFile {
-		if flag := l.Command.Flag(f); flag != nil && flag.Changed {
+		if flag := l.CobraCommand.Flag(f); flag != nil && flag.Changed {
 			return ErrCannotUseWithConfigFile(fmt.Sprintf("--%s", f))
 		}
 	}
@@ -113,17 +124,49 @@ func (l *commonClusterConfigLoader) validateMetadataWithoutConfigFile() error {
 // NewMetadataLoader handles loading of clusterConfigFile vs using flags for all commands that require only
 // metadata fields, e.g. `eksctl delete cluster` or `eksctl utils update-kube-proxy` and other similar
 // commands that do simple operations against existing clusters
-func NewMetadataLoader(rc *ResourceCmd) ClusterConfigLoader {
-	l := newCommonClusterConfigLoader(rc)
+func NewMetadataLoader(cmd *Cmd) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
 
 	l.validateWithoutConfigFile = l.validateMetadataWithoutConfigFile
 
 	return l
 }
 
+// NewEnableProfileLoader handles loading of clusterConfigFile vs using flags for gitops commands
+func NewEnableProfileLoader(cmd *Cmd) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
+
+	l.validateWithoutConfigFile = func() error {
+		meta := l.ClusterConfig.Metadata
+		if meta.Name == "" {
+			return ErrMustBeSet("--cluster")
+		}
+		return nil
+	}
+
+	return l
+}
+
+// NewInstallFluxLoader handles loading of clusterConfigFile vs using flags for install commands
+func NewInstallFluxLoader(cmd *Cmd) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
+
+	l.validateWithoutConfigFile = func() error {
+		meta := l.ClusterConfig.Metadata
+		if meta.Name == "" {
+			return ErrMustBeSet("--cluster")
+		}
+		return nil
+	}
+
+	return l
+}
+
 // NewCreateClusterLoader will load config or use flags for 'eksctl create cluster'
-func NewCreateClusterLoader(rc *ResourceCmd, ngFilter *NodeGroupFilter) ClusterConfigLoader {
-	l := newCommonClusterConfigLoader(rc)
+func NewCreateClusterLoader(cmd *Cmd, ngFilter *NodeGroupFilter, ng *api.NodeGroup, withoutNodeGroup bool) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
+
+	ngFilter.ExcludeAll = withoutNodeGroup
 
 	l.flagsIncompatibleWithConfigFile.Insert(
 		"tags",
@@ -186,6 +229,12 @@ func NewCreateClusterLoader(rc *ResourceCmd, ngFilter *NodeGroupFilter) ClusterC
 			return fmt.Errorf("status fields are read-only")
 		}
 
+		// prevent creation of invalid config object with irrelevant nodegroup
+		// that may or may not be constructed correctly
+		if !withoutNodeGroup {
+			l.ClusterConfig.NodeGroups = append(l.ClusterConfig.NodeGroups, ng)
+		}
+
 		return ngFilter.ForEach(l.ClusterConfig.NodeGroups, func(i int, ng *api.NodeGroup) error {
 			// generate nodegroup name or use flag
 			ng.Name = NodeGroupName(ng.Name, "")
@@ -197,11 +246,10 @@ func NewCreateClusterLoader(rc *ResourceCmd, ngFilter *NodeGroupFilter) ClusterC
 }
 
 // NewCreateNodeGroupLoader will load config or use flags for 'eksctl create nodegroup'
-func NewCreateNodeGroupLoader(rc *ResourceCmd, ngFilter *NodeGroupFilter) ClusterConfigLoader {
-	l := newCommonClusterConfigLoader(rc)
+func NewCreateNodeGroupLoader(cmd *Cmd, ngFilter *NodeGroupFilter) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
 
 	l.flagsIncompatibleWithConfigFile.Insert(
-		"cluster",
 		"nodes",
 		"nodes-min",
 		"nodes-max",
@@ -223,17 +271,8 @@ func NewCreateNodeGroupLoader(rc *ResourceCmd, ngFilter *NodeGroupFilter) Cluste
 	)
 
 	l.validateWithConfigFile = func() error {
-		if err := ngFilter.AppendGlobs(l.IncludeNodeGroups, l.ExcludeNodeGroups, l.ClusterConfig.NodeGroups); err != nil {
-			return err
-		}
-		return nil
+		return ngFilter.AppendGlobs(l.Include, l.Exclude, l.ClusterConfig.NodeGroups)
 	}
-
-	l.flagsIncompatibleWithoutConfigFile.Insert(
-		"only",
-		"include",
-		"exclude",
-	)
 
 	l.validateWithoutConfigFile = func() error {
 		if l.ClusterConfig.Metadata.Name == "" {
@@ -255,7 +294,7 @@ func NewCreateNodeGroupLoader(rc *ResourceCmd, ngFilter *NodeGroupFilter) Cluste
 }
 
 func normalizeNodeGroup(ng *api.NodeGroup, l *commonClusterConfigLoader) error {
-	if l.Command.Flag("ssh-public-key").Changed {
+	if flag := l.CobraCommand.Flag("ssh-public-key"); flag != nil && flag.Changed {
 		if *ng.SSH.PublicKeyPath == "" {
 			return fmt.Errorf("--ssh-public-key must be non-empty string")
 		}
@@ -272,22 +311,14 @@ func normalizeNodeGroup(ng *api.NodeGroup, l *commonClusterConfigLoader) error {
 }
 
 // NewDeleteNodeGroupLoader will load config or use flags for 'eksctl delete nodegroup'
-func NewDeleteNodeGroupLoader(rc *ResourceCmd, ng *api.NodeGroup, ngFilter *NodeGroupFilter) ClusterConfigLoader {
-	l := newCommonClusterConfigLoader(rc)
-
-	l.flagsIncompatibleWithConfigFile.Insert(
-		"cluster",
-	)
+func NewDeleteNodeGroupLoader(cmd *Cmd, ng *api.NodeGroup, ngFilter *NodeGroupFilter) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
 
 	l.validateWithConfigFile = func() error {
-		return ngFilter.AppendGlobs(l.IncludeNodeGroups, l.ExcludeNodeGroups, l.ClusterConfig.NodeGroups)
+		return ngFilter.AppendGlobs(l.Include, l.Exclude, l.ClusterConfig.NodeGroups)
 	}
 
 	l.flagsIncompatibleWithoutConfigFile.Insert(
-		"only",
-		"include",
-		"exclude",
-		"only-missing",
 		"approve",
 	)
 
@@ -319,8 +350,8 @@ func NewDeleteNodeGroupLoader(rc *ResourceCmd, ng *api.NodeGroup, ngFilter *Node
 }
 
 // NewUtilsEnableLoggingLoader will load config or use flags for 'eksctl utils update-cluster-logging'
-func NewUtilsEnableLoggingLoader(rc *ResourceCmd) ClusterConfigLoader {
-	l := newCommonClusterConfigLoader(rc)
+func NewUtilsEnableLoggingLoader(cmd *Cmd) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
 
 	l.flagsIncompatibleWithConfigFile.Insert(
 		"enable-types",
@@ -328,6 +359,138 @@ func NewUtilsEnableLoggingLoader(rc *ResourceCmd) ClusterConfigLoader {
 	)
 
 	l.validateWithoutConfigFile = l.validateMetadataWithoutConfigFile
+
+	return l
+}
+
+// NewUtilsAssociateIAMOIDCProviderLoader will load config or use flags for 'eksctl utils associal-iam-oidc-provider'
+func NewUtilsAssociateIAMOIDCProviderLoader(cmd *Cmd) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
+
+	l.validateWithoutConfigFile = func() error {
+		l.ClusterConfig.IAM.WithOIDC = api.Enabled()
+		return l.validateMetadataWithoutConfigFile()
+	}
+
+	l.validateWithConfigFile = func() error {
+		if api.IsDisabled(l.ClusterConfig.IAM.WithOIDC) {
+			return fmt.Errorf("'iam.withOIDC' is not enabled in %q", l.ClusterConfigFile)
+		}
+		return nil
+	}
+
+	return l
+}
+
+// NewCreateIAMServiceAccountLoader will laod config or use flags for 'eksctl create iamserviceaccount'
+func NewCreateIAMServiceAccountLoader(cmd *Cmd, saFilter *IAMServiceAccountFilter) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
+
+	l.flagsIncompatibleWithConfigFile.Insert(
+		"policy-arn",
+	)
+
+	l.validateWithConfigFile = func() error {
+		return saFilter.AppendGlobs(l.Include, l.Exclude, l.ClusterConfig.IAM.ServiceAccounts)
+	}
+
+	l.validateWithoutConfigFile = func() error {
+		if l.ClusterConfig.Metadata.Name == "" {
+			return ErrMustBeSet("--cluster")
+		}
+
+		if len(l.ClusterConfig.IAM.ServiceAccounts) != 1 {
+			return fmt.Errorf("unexpected number of service accounts")
+		}
+
+		serviceAccount := l.ClusterConfig.IAM.ServiceAccounts[0]
+
+		if serviceAccount.Name == "" {
+			return ErrMustBeSet("--name")
+		}
+
+		if len(serviceAccount.AttachPolicyARNs) == 0 {
+			return ErrMustBeSet("--attach-policy-arn")
+		}
+
+		return nil
+	}
+
+	return l
+}
+
+// NewGetIAMServiceAccountLoader will load config or use flags for 'eksctl get iamserviceaccount'
+func NewGetIAMServiceAccountLoader(cmd *Cmd, sa *api.ClusterIAMServiceAccount) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
+
+	l.validateWithConfigFile = func() error {
+		if api.IsDisabled(l.ClusterConfig.IAM.WithOIDC) {
+			return fmt.Errorf("'iam.withOIDC' is not enabled in %q", l.ClusterConfigFile)
+		}
+		return nil
+	}
+
+	l.validateWithoutConfigFile = func() error {
+		sa.AttachPolicyARNs = []string{""} // force to pass general validation
+
+		if l.ClusterConfig.Metadata.Name == "" {
+			return ErrMustBeSet("--cluster")
+		}
+
+		if l.NameArg != "" {
+			sa.Name = l.NameArg
+		}
+
+		if sa.Name == "" {
+			l.ClusterConfig.IAM.ServiceAccounts = nil
+		}
+
+		l.Plan = false
+
+		return nil
+	}
+
+	return l
+}
+
+// NewDeleteIAMServiceAccountLoader will load config or use flags for 'eksctl delete iamserviceaccount'
+func NewDeleteIAMServiceAccountLoader(cmd *Cmd, sa *api.ClusterIAMServiceAccount, saFilter *IAMServiceAccountFilter) ClusterConfigLoader {
+	l := newCommonClusterConfigLoader(cmd)
+
+	l.validateWithConfigFile = func() error {
+		if api.IsDisabled(l.ClusterConfig.IAM.WithOIDC) {
+			return fmt.Errorf("'iam.withOIDC' is not enabled in %q", l.ClusterConfigFile)
+		}
+		return saFilter.AppendGlobs(l.Include, l.Exclude, l.ClusterConfig.IAM.ServiceAccounts)
+	}
+
+	l.flagsIncompatibleWithoutConfigFile.Insert(
+		"approve",
+	)
+
+	l.validateWithoutConfigFile = func() error {
+		sa.AttachPolicyARNs = []string{""} // force to pass general validation
+
+		if l.ClusterConfig.Metadata.Name == "" {
+			return ErrMustBeSet("--cluster")
+		}
+
+		if sa.Name != "" && l.NameArg != "" {
+			return ErrNameFlagAndArg(sa.Name, l.NameArg)
+		}
+
+		if l.NameArg != "" {
+			sa.Name = l.NameArg
+		}
+
+		if sa.Name == "" {
+			return ErrMustBeSet("--name")
+		}
+
+		l.Plan = false
+
+		return nil
+	}
 
 	return l
 }

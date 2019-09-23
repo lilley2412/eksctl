@@ -15,14 +15,20 @@ simple statement that you, as a contributor, have the legal right to make the
 contribution. No action from you is required, but it's a good idea to see the
 [DCO](DCO) file for details before you start contributing code to eksctl.
 
-## Chat
+## Communication
 
 The project uses Slack. If you get stuck or just have a question then you are encouraged to join the
 [Weave Community](https://weaveworks.github.io/community-slack/) Slack workspace and use the
-[#eksctl](https://weave-community.slack.com/messages/eksctl/) channel.
+[#eksctl](https://weave-community.slack.com/messages/eksctl/) channel and/or the [mailing
+list](maillist).
+
+We use the mailing list for some discussion, potentially for sharing documents
+and for calendar invites.
 
 Regular contributor meetings are held on Slack, see [`docs/contributor-meetings.md`](docs/contributor-meetings.md) for
 the latest information.
+
+[maillist]: https://groups.google.com/forum/#!forum/eksctl
 
 ## Getting Started
 
@@ -64,12 +70,19 @@ make test
 make build
 ```
 
-> NOTE: Windows users should install Docker for Windows and run `make eksctl-image` to build their code.
+To run integration test you will need an AWS account.
+```bash
+make integration-test-container TEST_V=1
+```
 
-> TODO: Improve Windows instructions, ensure `go build` works.
-
-There are integration tests for *eksctl* being developed and more details of
-how to run them will be included here. You can follow the progress [here](https://github.com/weaveworks/eksctl/issues/151).
+> NOTE: If you are working on Windows, you cannot use `make` at the moment,
+> as the `Makefile` is currently not portable.
+> However, if you have Git and Go installed, you can still build a binary
+> and run unit tests.
+> ```
+> go build .\cmd\eksctl
+> go test .\pkg\...
+> ```
 
 #### 4. Write your feature
 
@@ -134,11 +147,11 @@ Changes to ensure that AWS profiles are supported. This involved making
 sure that the AWS config file is loaded (SharedConfigEnabled) and
 also making sure we have a TokenProvider set.
 
-Added an explicit --profile flag that can be used to explicity specify
+Added an explicit --profile flag that can be used to explicitly specify
 which AWS profile you would like to use. This will override any profile
 that you have specified via AWS_PROFILE.
 
-If endpoints are being overriden then the credentials from the initial
+If endpoints are being overridden then the credentials from the initial
 session creation are shared with any subsequent session creation to
 ensure that the tokens are shared (otherwise you may get multiple MFA
 prompts).
@@ -163,16 +176,49 @@ This allows the message to be easier to read on GitHub as well as in various git
 ## Release Process
 
 1. Ensure integration tests pass (ETA: 45 minutes ; more details below).
-2. Determine next release tag (e.g. `0.1.35`).
-3. Create release notes file for the given tag – `docs/release_notes/<tag>.md` (e.g. `docs/release_notes/0.1.35.md`).
-4. Run `./tag-release-candidate.sh <tag>-rc.<N>` or `./tag-release.sh <tag>` (e.g. `./tag-release-candidate.sh 0.1.35-rc.0` or `./tag-release.sh 0.1.35`).
-5. Ensure release jobs succeeded in [CircleCI](https://circleci.com/gh/weaveworks/eksctl).
-6. Ensure the release was successfully [published in Github](https://github.com/weaveworks/eksctl/releases).
-7. Download the binary just released, verify its checksum, and perform any relevant manual testing.
+2. Determine the next release tag, e.g.:
+
+   - for a release candidate, `0.4.0-rc.0`, or
+   - for a release, `0.4.0`.
+
+3. Create a `docs/release_notes/<tag>.md` release notes file for the given tag, e.g.:
+
+    ```console
+    touch docs/release_notes/0.4.0.md
+    ```
+
+4. Check out the latest `master`:
+
+    ```console
+    git checkout master
+    git fetch origin master
+    git merge --ff-only origin/master
+    ```
+
+5. Run:
+
+   - for a release candidate: `./tag-release-candidate.sh <tag>-rc.<N>`, e.g.:
+
+     ```console
+     ./tag-release-candidate.sh 0.4.0-rc.0
+     ```
+
+   - for a release: `./tag-release.sh <tag>`, e.g.:
+
+     ```console
+     ./tag-release.sh 0.4.0
+     ```
+
+6. Ensure release jobs succeeded in [CircleCI](https://circleci.com/gh/weaveworks/eksctl).
+7. Ensure the release was successfully [published in Github](https://github.com/weaveworks/eksctl/releases).
+8. Download the binary just released, verify its checksum, and perform any relevant manual testing.
 
 ### Notes on Integration Tests
 
-It's recommended to run containerised tests with `make integration-test-container TEST_V=1 AWS_PROFILE="<AWS profile name>"`. The tests require access to an AWS account. If there is an issue with access (e.g. expired MFA token), you will see all tests failing (albeit the error message may be slightly unclear).
+It's recommended to run containerised tests with `make integration-test-container TEST_V=1 AWS_PROFILE="<AWS profile name>"`. The tests require:
+
+- Access to an AWS account. If there is an issue with access (e.g. expired MFA token), you will see all tests failing (albeit the error message may be slightly unclear).
+- Access to the private SSH key for the Git repository to use for testing gitops-related operations. It is recommended to extract the private SSH key available [here](https://weaveworks.1password.com/vaults/all/allitems/kuxa5ujn7424jzkqqk7qtngovi) into `~/.ssh/eksctl-bot_id_rsa`, and then let the integration tests mount this path and use this key.
 
 At present we ignore flaky tests, so if you see output like show below, you don't need to worry about this for the purpose of the release. However, you might consider reviewing the issues in question after you made the release.
 
@@ -196,7 +242,7 @@ FAIL! -- 24 Passed | 2 Failed | 0 Pending | 0 Skipped
 
 When you run `./tag-release.sh <tag>` it will push a commit to master and a tag, which will trigger [release workflow](https://github.com/weaveworks/eksctl/blob/38364943776230bcc9ad57a9f8a423c7ec3fb7fe/.circleci/config.yml#L28-L42) in Circle CI. This runs `make eksctl-image` followed by `make release`. Most of the logic is defined in [`do-release.sh`](https://github.com/weaveworks/eksctl/blob/master/do-release.sh).
 
-You want to keep an eye on Circle CI for the progress of the release ([0.1.35 example logs](https://circleci.com/workflow-run/3553542c-88ad-4a77-bd42-441da4c87fa1)). It normally takes 15-20 minutes.
+You want to keep an eye on Circle CI for the progress of the release ([0.3.1 example logs](https://circleci.com/workflow-run/02d8b5fb-bc7f-404c-9051-68307c124649)). It normally takes around 30 minutes.
 
 ### Notes on Artefacts
 
@@ -204,5 +250,5 @@ We use `latest_release` floating tag, in order to enable static URLs for release
 
 That means you will see two entries on [the release page](https://github.com/weaveworks/eksctl/releases):
 
-- [**eksctl 0.1.35 (permalink)**](https://github.com/weaveworks/eksctl/releases/tag/0.1.35)
-- [**eksctl 0.1.35**](https://github.com/weaveworks/eksctl/releases/tag/latest_release)
+- [**eksctl 0.4.0 (permalink)**](https://github.com/weaveworks/eksctl/releases/tag/0.4.0)
+- [**eksctl 0.4.0**](https://github.com/weaveworks/eksctl/releases/tag/latest_release)

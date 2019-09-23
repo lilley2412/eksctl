@@ -7,12 +7,50 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
+// NOTE: we don't use k8s.io/apimachinery/pkg/util/sets here to keep API package free of dependencies
+type nameSet map[string]struct{}
+
+func (s nameSet) checkUnique(path, name string) (bool, error) {
+	if _, notUnique := s[name]; notUnique {
+		return false, fmt.Errorf("%s %q is not unique", path, name)
+	}
+	s[name] = struct{}{}
+	return true, nil
+}
 
 // ValidateClusterConfig checks compatible fields of a given ClusterConfig
 func ValidateClusterConfig(cfg *ClusterConfig) error {
+	if IsDisabled(cfg.IAM.WithOIDC) && len(cfg.IAM.ServiceAccounts) > 0 {
+		return fmt.Errorf("iam.withOIDC must be enabled explicitly for iam.serviceAccounts to be created")
+	}
+
+	saNames := nameSet{}
+	for i, sa := range cfg.IAM.ServiceAccounts {
+		path := fmt.Sprintf("iam.serviceAccounts[%d]", i)
+		if sa.Name == "" {
+			return fmt.Errorf("%s.name must be set", path)
+		}
+		if ok, err := saNames.checkUnique("<namespace>/<name> of "+path, sa.NameString()); !ok {
+			return err
+		}
+		if len(sa.AttachPolicyARNs) == 0 && sa.AttachPolicy == nil {
+			return fmt.Errorf("%s.attachPolicyARNs or %s.attachPolicy must be set", path, path)
+		}
+	}
+
+	ngNames := nameSet{}
+	for i, ng := range cfg.NodeGroups {
+		path := fmt.Sprintf("nodeGroups[%d]", i)
+		if ng.Name == "" {
+			return fmt.Errorf("%s.name must be set", path)
+		}
+		if ok, err := ngNames.checkUnique(path+".name", ng.NameString()); !ok {
+			return err
+		}
+	}
+
 	if cfg.HasClusterCloudWatchLogging() {
-		// NOTE: we don't use k8s.io/apimachinery/pkg/util/sets here to keep API package free of dependencies
-		for _, logType := range cfg.CloudWatch.ClusterLogging.EnableTypes {
+		for i, logType := range cfg.CloudWatch.ClusterLogging.EnableTypes {
 			isUnknown := true
 			for _, knownLogType := range SupportedCloudWatchClusterLogTypes() {
 				if logType == knownLogType {
@@ -20,19 +58,17 @@ func ValidateClusterConfig(cfg *ClusterConfig) error {
 				}
 			}
 			if isUnknown {
-				return fmt.Errorf("log type %q is unknown", logType)
+				return fmt.Errorf("log type %q (cloudWatch.clusterLogging.enableTypes[%d]) is unknown", logType, i)
 			}
 		}
 	}
+
 	return nil
 }
 
 // ValidateNodeGroup checks compatible fields of a given nodegroup
 func ValidateNodeGroup(i int, ng *NodeGroup) error {
-	path := fmt.Sprintf("nodegroups[%d]", i)
-	if ng.Name == "" {
-		return fmt.Errorf("%s.name must be set", path)
-	}
+	path := fmt.Sprintf("nodeGroups[%d]", i)
 
 	if ng.VolumeSize == nil {
 		errCantSet := func(field string) error {
@@ -62,7 +98,7 @@ func ValidateNodeGroup(i int, ng *NodeGroup) error {
 
 	if ng.VolumeEncrypted == nil || IsDisabled(ng.VolumeEncrypted) {
 		if IsSetAndNonEmptyString(ng.VolumeKmsKeyID) {
-			return fmt.Errorf("%s.VolumeKmsKeyID can not be set without %s.VolumeEncrypted true", path, path)
+			return fmt.Errorf("%s.VolumeKmsKeyID can not be set without %s.VolumeEncrypted enabled explicitly", path, path)
 		}
 	}
 
@@ -101,7 +137,7 @@ func ValidateNodeGroupLabels(ng *NodeGroup) error {
 	// compact version based on:
 	// - https://github.com/kubernetes/kubernetes/blob/v1.13.2/cmd/kubelet/app/options/options.go#L257-L267
 	// - https://github.com/kubernetes/kubernetes/blob/v1.13.2/pkg/kubelet/apis/well_known_labels.go
-	// we cannot import those package because they break other dependencies
+	// we cannot import those packages because they break other dependencies
 
 	unknownKubernetesLabels := []string{}
 
@@ -163,48 +199,51 @@ func ValidateNodeGroupLabels(ng *NodeGroup) error {
 	return nil
 }
 
-
 func validateNodeGroupIAM(i int, ng *NodeGroup, value, fieldName, path string) error {
 	if value != "" {
-		p := fmt.Sprintf("%s.iam.%s and %s.iam", path, fieldName, path)
+		fmtFieldConflictErr := func(conflictingField string) error {
+			return fmt.Errorf("%s.iam.%s and %s.iam.%s cannot be set at the same time", path, fieldName, path, conflictingField)
+		}
+
 		if ng.IAM.InstanceRoleName != "" {
-			return fmt.Errorf("%s.instanceRoleName cannot be set at the same time", p)
+			return fmtFieldConflictErr("instanceRoleName")
 		}
 		if len(ng.IAM.AttachPolicyARNs) != 0 {
-			return fmt.Errorf("%s.attachPolicyARNs cannot be set at the same time", p)
+			return fmtFieldConflictErr("attachPolicyARNs")
 		}
+		prefix := "withAddonPolicies."
 		if IsEnabled(ng.IAM.WithAddonPolicies.AutoScaler) {
-			return fmt.Errorf("%s.withAddonPolicies.autoScaler cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "autoScaler")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.ExternalDNS) {
-			return fmt.Errorf("%s.withAddonPolicies.externalDNS cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "externalDNS")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.CertManager) {
-			return fmt.Errorf("%s.withAddonPolicies.certManager cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "certManager")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.ImageBuilder) {
-			return fmt.Errorf("%s.imageBuilder cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "imageBuilder")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.AppMesh) {
-			return fmt.Errorf("%s.AppMesh cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "appMesh")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.EBS) {
-			return fmt.Errorf("%s.ebs cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "ebs")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.FSX) {
-			return fmt.Errorf("%s.fsx cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "fsx")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.EFS) {
-			return fmt.Errorf("%s.efs cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "efs")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.ALBIngress) {
-			return fmt.Errorf("%s.albIngress cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "albIngress")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.XRay) {
-			return fmt.Errorf("%s.xRay cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "xRay")
 		}
 		if IsEnabled(ng.IAM.WithAddonPolicies.CloudWatch) {
-			return fmt.Errorf("%s.cloudWatch cannot be set at the same time", p)
+			return fmtFieldConflictErr(prefix + "cloudWatch")
 		}
 	}
 	return nil
@@ -273,7 +312,7 @@ func countEnabledFields(fields ...*string) int {
 	return count
 }
 
-func validateNodeGroupKubeletExtraConfig(kubeletConfig *NodeGroupKubeletConfig) error {
+func validateNodeGroupKubeletExtraConfig(kubeletConfig *InlineDocument) error {
 	if kubeletConfig == nil {
 		return nil
 	}

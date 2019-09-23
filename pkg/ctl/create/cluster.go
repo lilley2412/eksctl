@@ -11,7 +11,6 @@ import (
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/authconfigmap"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
-	"github.com/weaveworks/eksctl/pkg/eks"
 	"github.com/weaveworks/eksctl/pkg/kops"
 	"github.com/weaveworks/eksctl/pkg/printers"
 	"github.com/weaveworks/eksctl/pkg/utils"
@@ -32,42 +31,43 @@ type createClusterCmdParams struct {
 	withoutNodeGroup      bool
 }
 
-func createClusterCmd(rc *cmdutils.ResourceCmd) {
+func createClusterCmd(cmd *cmdutils.Cmd) {
 	cfg := api.NewClusterConfig()
-	ng := cfg.NewNodeGroup()
-	rc.ClusterConfig = cfg
+	ng := api.NewNodeGroup()
+	cmd.ClusterConfig = cfg
 
 	params := &createClusterCmdParams{}
 
-	rc.SetDescription("cluster", "Create a cluster", "")
+	cmd.SetDescription("cluster", "Create a cluster", "")
 
-	rc.SetRunFuncWithNameArg(func() error {
-		return doCreateCluster(rc, params)
+	cmd.SetRunFuncWithNameArg(func() error {
+		return doCreateCluster(cmd, ng, params)
 	})
 
 	exampleClusterName := cmdutils.ClusterName("", "")
 	exampleNodeGroupName := cmdutils.NodeGroupName("", "")
 
-	rc.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
 		fs.StringVarP(&cfg.Metadata.Name, "name", "n", "", fmt.Sprintf("EKS cluster name (generated if unspecified, e.g. %q)", exampleClusterName))
 		fs.StringToStringVarP(&cfg.Metadata.Tags, "tags", "", map[string]string{}, `A list of KV pairs used to tag the AWS resources (e.g. "Owner=John Doe,Team=Some Team")`)
-		cmdutils.AddRegionFlag(fs, rc.ProviderConfig)
+		cmdutils.AddRegionFlag(fs, cmd.ProviderConfig)
 		fs.StringSliceVar(&params.availabilityZones, "zones", nil, "(auto-select if unspecified)")
 		cmdutils.AddVersionFlag(fs, cfg.Metadata, "")
-		cmdutils.AddConfigFileFlag(fs, &rc.ClusterConfigFile)
+		cmdutils.AddConfigFileFlag(fs, &cmd.ClusterConfigFile)
+		cmdutils.AddTimeoutFlag(fs, &cmd.ProviderConfig.WaitTimeout)
 	})
 
-	rc.FlagSetGroup.InFlagSet("Initial nodegroup", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("Initial nodegroup", func(fs *pflag.FlagSet) {
 		fs.StringVar(&ng.Name, "nodegroup-name", "", fmt.Sprintf("name of the nodegroup (generated if unspecified, e.g. %q)", exampleNodeGroupName))
 		fs.BoolVar(&params.withoutNodeGroup, "without-nodegroup", false, "if set, initial nodegroup will not be created")
-		cmdutils.AddCommonCreateNodeGroupFlags(fs, rc, ng)
+		cmdutils.AddCommonCreateNodeGroupFlags(fs, cmd, ng)
 	})
 
-	rc.FlagSetGroup.InFlagSet("Cluster and nodegroup add-ons", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("Cluster and nodegroup add-ons", func(fs *pflag.FlagSet) {
 		cmdutils.AddCommonCreateNodeGroupIAMAddonsFlags(fs, ng)
 	})
 
-	rc.FlagSetGroup.InFlagSet("VPC networking", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("VPC networking", func(fs *pflag.FlagSet) {
 		fs.IPNetVar(&cfg.VPC.CIDR.IPNet, "vpc-cidr", cfg.VPC.CIDR.IPNet, "global CIDR to use for VPC")
 		params.subnets = map[api.SubnetTopology]*[]string{
 			api.SubnetTopologyPrivate: fs.StringSlice("vpc-private-subnets", nil, "re-use private subnets of an existing VPC"),
@@ -77,40 +77,29 @@ func createClusterCmd(rc *cmdutils.ResourceCmd) {
 		fs.StringVar(cfg.VPC.NAT.Gateway, "vpc-nat-mode", api.ClusterSingleNAT, "VPC NAT mode, valid options: HighlyAvailable, Single, Disable")
 	})
 
-	cmdutils.AddCommonFlagsForAWS(rc.FlagSetGroup, rc.ProviderConfig, true)
+	cmdutils.AddCommonFlagsForAWS(cmd.FlagSetGroup, cmd.ProviderConfig, true)
 
-	rc.FlagSetGroup.InFlagSet("Output kubeconfig", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("Output kubeconfig", func(fs *pflag.FlagSet) {
 		cmdutils.AddCommonFlagsForKubeconfig(fs, &params.kubeconfigPath, &params.authenticatorRoleARN, &params.setContext, &params.autoKubeconfigPath, exampleClusterName)
 		fs.BoolVar(&params.writeKubeconfig, "write-kubeconfig", true, "toggle writing of kubeconfig")
 	})
 }
 
-func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) error {
+func doCreateCluster(cmd *cmdutils.Cmd, ng *api.NodeGroup, params *createClusterCmdParams) error {
 	ngFilter := cmdutils.NewNodeGroupFilter()
-	ngFilter.ExcludeAll = params.withoutNodeGroup
 
-	if err := cmdutils.NewCreateClusterLoader(rc, ngFilter).Load(); err != nil {
+	if err := cmdutils.NewCreateClusterLoader(cmd, ngFilter, ng, params.withoutNodeGroup).Load(); err != nil {
 		return err
 	}
 
-	cfg := rc.ClusterConfig
-	meta := rc.ClusterConfig.Metadata
-
-	api.SetClusterConfigDefaults(cfg)
-
-	if err := api.ValidateClusterConfig(cfg); err != nil {
-		return err
-	}
-
-	if err := ngFilter.ValidateNodeGroupsAndSetDefaults(cfg.NodeGroups); err != nil {
-		return err
-	}
+	cfg := cmd.ClusterConfig
+	meta := cmd.ClusterConfig.Metadata
 
 	printer := printers.NewJSONPrinter()
-	ctl := eks.New(rc.ProviderConfig, cfg)
 
-	if !ctl.IsSupportedRegion() {
-		return cmdutils.ErrUnsupportedRegion(rc.ProviderConfig)
+	ctl, err := cmd.NewCtl()
+	if err != nil {
+		return err
 	}
 	logger.Info("using region %s", meta.Region)
 
@@ -149,6 +138,7 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 			}
 		}
 	}
+	filteredNodeGroups := ngFilter.FilterMatching(cfg.NodeGroups)
 	subnetsGiven := cfg.HasAnySubnets() // this will be false when neither flags nor config has any subnets
 
 	createOrImportVPC := func() error {
@@ -160,9 +150,9 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 
 		customNetworkingNotice := "custom VPC/subnets will be used; if resulting cluster doesn't function as expected, make sure to review the configuration of VPC/subnets"
 
-		canUseForPrivateNodeGroups := func(_ int, ng *api.NodeGroup) error {
+		canUseForPrivateNodeGroups := func(ng *api.NodeGroup) error {
 			if ng.PrivateNetworking && !cfg.HasSufficientPrivateSubnets() {
-				return fmt.Errorf("none or too few private subnets to use with --node-private-networking")
+				return errors.New("none or too few private subnets to use with --node-private-networking")
 			}
 			return nil
 		}
@@ -183,7 +173,7 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 			if len(params.availabilityZones) != 0 {
 				return fmt.Errorf("--vpc-from-kops-cluster and --zones %s", cmdutils.IncompatibleFlags)
 			}
-			if rc.Command.Flag("vpc-cidr").Changed {
+			if cmd.CobraCommand.Flag("vpc-cidr").Changed {
 				return fmt.Errorf("--vpc-from-kops-cluster and --vpc-cidr %s", cmdutils.IncompatibleFlags)
 			}
 
@@ -191,7 +181,7 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 				return fmt.Errorf("--vpc-from-kops-cluster and --vpc-private-subnets/--vpc-public-subnets %s", cmdutils.IncompatibleFlags)
 			}
 
-			kw, err := kops.NewWrapper(rc.ProviderConfig.Region, params.kopsClusterNameForVPC)
+			kw, err := kops.NewWrapper(cmd.ProviderConfig.Region, params.kopsClusterNameForVPC)
 			if err != nil {
 				return err
 			}
@@ -200,8 +190,10 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 				return err
 			}
 
-			if err := ngFilter.ForEach(cfg.NodeGroups, canUseForPrivateNodeGroups); err != nil {
-				return err
+			for _, ng := range filteredNodeGroups {
+				if err := canUseForPrivateNodeGroups(ng); err != nil {
+					return err
+				}
 			}
 
 			logger.Success("using %s from kops cluster %q", subnetInfo(), params.kopsClusterNameForVPC)
@@ -214,7 +206,7 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 		if len(params.availabilityZones) != 0 {
 			return fmt.Errorf("--vpc-private-subnets/--vpc-public-subnets and --zones %s", cmdutils.IncompatibleFlags)
 		}
-		if rc.Command.Flag("vpc-cidr").Changed {
+		if cmd.CobraCommand.Flag("vpc-cidr").Changed {
 			return fmt.Errorf("--vpc-private-subnets/--vpc-public-subnets and --vpc-cidr %s", cmdutils.IncompatibleFlags)
 		}
 
@@ -227,8 +219,10 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 			return err
 		}
 
-		if err := ngFilter.ForEach(cfg.NodeGroups, canUseForPrivateNodeGroups); err != nil {
-			return err
+		for _, ng := range filteredNodeGroups {
+			if err := canUseForPrivateNodeGroups(ng); err != nil {
+				return err
+			}
 		}
 
 		logger.Success("using existing %s", subnetInfo())
@@ -240,7 +234,7 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 		return err
 	}
 
-	err := ngFilter.ForEach(cfg.NodeGroups, func(_ int, ng *api.NodeGroup) error {
+	for _, ng := range filteredNodeGroups {
 		// resolve AMI
 		if err := ctl.EnsureAMI(meta.Version, ng); err != nil {
 			return err
@@ -258,17 +252,13 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 		if err := loadSSHKey(ng, meta.Name, ctl.Provider); err != nil {
 			return err
 		}
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 
 	logger.Info("using Kubernetes version %s", meta.Version)
 	logger.Info("creating %s", meta.LogString())
 
 	// TODO dry-run mode should provide a way to render config with all defaults set
-	// we should also make a call to resolve the AMI and write the result, similaraly
+	// we should also make a call to resolve the AMI and write the result, similarly
 	// the body of the SSH key can be read
 
 	if err := printer.LogObj(logger.Debug, "cfg.json = \\\n%s\n", cfg); err != nil {
@@ -276,19 +266,16 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 	}
 
 	{ // core action
-		ngSubset, _ := ngFilter.MatchAll(cfg.NodeGroups)
 		stackManager := ctl.NewStackManager(cfg)
-		if ngCount := ngSubset.Len(); ngCount == 1 && rc.ClusterConfigFile == "" {
+		if len(filteredNodeGroups) == 1 && cmd.ClusterConfigFile == "" {
 			logger.Info("will create 2 separate CloudFormation stacks for cluster itself and the initial nodegroup")
 		} else {
 			ngFilter.LogInfo(cfg.NodeGroups)
-			logger.Info("will create a CloudFormation stack for cluster itself and %d nodegroup stack(s)", ngCount)
+			logger.Info("will create a CloudFormation stack for cluster itself and %d nodegroup stack(s)", len(filteredNodeGroups))
 		}
 		logger.Info("if you encounter any issues, check CloudFormation console or try 'eksctl utils describe-stacks --region=%s --name=%s'", meta.Region, meta.Name)
-		tasks := stackManager.NewTasksToCreateClusterWithNodeGroups(ngSubset)
-		if updateClusterTasks := ctl.GetUpdateClusterConfigTasks(cfg); updateClusterTasks != nil {
-			tasks.Append(updateClusterTasks)
-		}
+		tasks := stackManager.NewTasksToCreateClusterWithNodeGroups(filteredNodeGroups)
+		ctl.AppendExtraClusterConfigTasks(cfg, tasks)
 
 		logger.Info(tasks.Describe())
 		if errs := tasks.DoAllSync(); len(errs) > 0 {
@@ -331,7 +318,7 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 			return err
 		}
 
-		err = ngFilter.ForEach(cfg.NodeGroups, func(_ int, ng *api.NodeGroup) error {
+		for _, ng := range filteredNodeGroups {
 			// authorise nodes to join
 			if err = authconfigmap.AddNodeGroup(clientSet, ng); err != nil {
 				return err
@@ -348,10 +335,6 @@ func doCreateCluster(rc *cmdutils.ResourceCmd, params *createClusterCmdParams) e
 				logger.Info("\t see the following page for instructions: https://github.com/NVIDIA/k8s-device-plugin")
 			}
 
-			return nil
-		})
-		if err != nil {
-			return err
 		}
 
 		// check kubectl version, and offer install instructions if missing or old

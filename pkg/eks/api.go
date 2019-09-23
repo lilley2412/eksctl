@@ -102,9 +102,9 @@ func (p ProviderServices) WaitTimeout() time.Duration { return p.spec.WaitTimeou
 
 // ProviderStatus stores information about the used IAM role and the resulting session
 type ProviderStatus struct {
-	iamRoleARN        string
-	sessionCreds      *credentials.Credentials
-	cachedClusterInfo *awseks.Cluster
+	iamRoleARN   string
+	sessionCreds *credentials.Credentials
+	clusterInfo  *clusterInfo
 }
 
 // New creates a new setup of the used AWS APIs
@@ -308,7 +308,7 @@ func (c *ClusterProvider) SetNodeLabels(ng *api.NodeGroup, meta *api.ClusterMeta
 }
 
 func errTooFewAvailabilityZones(azs []string) error {
-	return fmt.Errorf("only %d zones specified %v, %d are required (can be non-unque)", len(azs), azs, az.MinRequiredAvailabilityZones)
+	return fmt.Errorf("only %d zones specified %v, %d are required (can be non-unique)", len(azs), azs, az.MinRequiredAvailabilityZones)
 }
 
 // SetAvailabilityZones sets the given (or chooses) the availability zones

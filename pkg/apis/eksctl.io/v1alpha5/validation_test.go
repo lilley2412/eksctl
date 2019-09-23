@@ -6,6 +6,266 @@ import (
 )
 
 var _ = Describe("ClusterConfig validation", func() {
+	Describe("nodeGroups[*].name", func() {
+		var (
+			cfg *ClusterConfig
+			err error
+		)
+
+		BeforeEach(func() {
+			cfg = NewClusterConfig()
+			ng0 := cfg.NewNodeGroup()
+			ng0.Name = "ng0"
+			ng1 := cfg.NewNodeGroup()
+			ng1.Name = "ng1"
+		})
+
+		It("should handle unique nodegroups", func() {
+			err = ValidateClusterConfig(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			for i, ng := range cfg.NodeGroups {
+				err = ValidateNodeGroup(i, ng)
+				Expect(err).ToNot(HaveOccurred())
+			}
+		})
+
+		It("should handle non-unique nodegroups", func() {
+			cfg.NodeGroups[0].Name = "ng"
+			cfg.NodeGroups[1].Name = "ng"
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should handle unamed nodegroups", func() {
+			cfg.NodeGroups[0].Name = ""
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	Describe("nodeGroups[*].iam", func() {
+		var (
+			cfg *ClusterConfig
+			err error
+			ng1 *NodeGroup
+		)
+
+		BeforeEach(func() {
+			cfg = NewClusterConfig()
+
+			ng0 := cfg.NewNodeGroup()
+			ng0.Name = "ng0"
+
+			ng0.IAM.AttachPolicyARNs = []string{
+				"foo",
+				"bar",
+			}
+			ng0.IAM.WithAddonPolicies.ExternalDNS = Enabled()
+			ng0.IAM.WithAddonPolicies.ALBIngress = Enabled()
+			ng0.IAM.WithAddonPolicies.ImageBuilder = Enabled()
+
+			ng1 = cfg.NewNodeGroup()
+			ng1.Name = "ng1"
+		})
+
+		JustBeforeEach(func() {
+			err = ValidateClusterConfig(cfg)
+			Expect(err).ToNot(HaveOccurred())
+
+			for i, ng := range cfg.NodeGroups {
+				err = ValidateNodeGroup(i, ng)
+				Expect(err).ToNot(HaveOccurred())
+			}
+		})
+
+		It("should allow setting only instanceProfileARN", func() {
+			ng1.IAM.InstanceProfileARN = "p1"
+
+			err = ValidateNodeGroup(1, ng1)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should allow setting only instanceRoleARN", func() {
+			ng1.IAM.InstanceRoleARN = "r1"
+
+			err = ValidateNodeGroup(1, ng1)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should allow setting instanceProfileARN and instanceRoleARN", func() {
+			ng1.IAM.InstanceProfileARN = "p1"
+			ng1.IAM.InstanceRoleARN = "r1"
+
+			err = ValidateNodeGroup(1, ng1)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should not allow setting instanceProfileARN and instanceRoleName", func() {
+			ng1.IAM.InstanceProfileARN = "p1"
+			ng1.IAM.InstanceRoleName = "aRole"
+
+			err = ValidateNodeGroup(1, ng1)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(Equal("nodeGroups[1].iam.instanceProfileARN and nodeGroups[1].iam.instanceRoleName cannot be set at the same time"))
+		})
+
+		It("should not allow setting instanceRoleARN and instanceRoleName", func() {
+			ng1.IAM.InstanceRoleARN = "r1"
+			ng1.IAM.InstanceRoleName = "aRole"
+
+			err = ValidateNodeGroup(1, ng1)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(Equal("nodeGroups[1].iam.instanceRoleARN and nodeGroups[1].iam.instanceRoleName cannot be set at the same time"))
+		})
+
+		It("should not allow setting instanceRoleARN and attachPolicyARNs", func() {
+			ng1.IAM.InstanceRoleARN = "r1"
+			ng1.IAM.AttachPolicyARNs = []string{
+				"foo",
+				"bar",
+			}
+
+			err = ValidateNodeGroup(1, ng1)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(Equal("nodeGroups[1].iam.instanceRoleARN and nodeGroups[1].iam.attachPolicyARNs cannot be set at the same time"))
+		})
+
+		It("should not allow setting instanceRoleARN and withAddonPolicies", func() {
+			ng1.IAM.InstanceRoleARN = "r1"
+
+			ng1.IAM.WithAddonPolicies.ExternalDNS = Enabled()
+
+			err = ValidateNodeGroup(1, ng1)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(Equal("nodeGroups[1].iam.instanceRoleARN and nodeGroups[1].iam.withAddonPolicies.externalDNS cannot be set at the same time"))
+		})
+
+	})
+
+	Describe("iam.{withOIDC,serviceAccounts}", func() {
+		var (
+			cfg *ClusterConfig
+			err error
+		)
+
+		BeforeEach(func() {
+			cfg = NewClusterConfig()
+		})
+
+		It("should pass when iam.withOIDC is unset", func() {
+			cfg.IAM.WithOIDC = nil
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should pass when iam.withOIDC is disabled", func() {
+			cfg.IAM.WithOIDC = Disabled()
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should pass when iam.withOIDC is enabled", func() {
+			cfg.IAM.WithOIDC = Enabled()
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should fail when iam.withOIDC is disabled and some iam.serviceAccounts are given", func() {
+			cfg.IAM.WithOIDC = Disabled()
+
+			cfg.IAM.ServiceAccounts = []*ClusterIAMServiceAccount{{}, {}}
+			cfg.IAM.ServiceAccounts[0].Name = "sa-1"
+			cfg.IAM.ServiceAccounts[1].Name = "sa-2"
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(HavePrefix("iam.withOIDC must be enabled explicitly"))
+		})
+
+		It("should pass when iam.withOIDC is enabled and some iam.serviceAccounts are given", func() {
+			cfg.IAM.WithOIDC = Enabled()
+
+			cfg.IAM.ServiceAccounts = []*ClusterIAMServiceAccount{{}, {}}
+
+			cfg.IAM.ServiceAccounts[0].Name = "sa-1"
+			cfg.IAM.ServiceAccounts[0].AttachPolicyARNs = []string{""}
+
+			cfg.IAM.ServiceAccounts[1].Name = "sa-2"
+			cfg.IAM.ServiceAccounts[1].AttachPolicy = map[string]interface{}{"Statement": "foo"}
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should fail when unnamed iam.serviceAccounts[1] is given", func() {
+			cfg.IAM.WithOIDC = Enabled()
+
+			cfg.IAM.ServiceAccounts = []*ClusterIAMServiceAccount{{}, {}}
+			cfg.IAM.ServiceAccounts[0].Name = "sa-1"
+			cfg.IAM.ServiceAccounts[0].AttachPolicyARNs = []string{""}
+
+			cfg.IAM.ServiceAccounts[1].Name = ""
+			cfg.IAM.ServiceAccounts[1].AttachPolicy = map[string]interface{}{"Statement": "foo"}
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(HavePrefix("iam.serviceAccounts[1].name must be set"))
+		})
+
+		It("should fail when iam.serviceAccounts[1] has no policy", func() {
+			cfg.IAM.WithOIDC = Enabled()
+
+			cfg.IAM.ServiceAccounts = []*ClusterIAMServiceAccount{{}, {}}
+			cfg.IAM.ServiceAccounts[0].Name = "sa-1"
+			cfg.IAM.ServiceAccounts[0].AttachPolicyARNs = []string{""}
+
+			cfg.IAM.ServiceAccounts[1].Name = "sa-2"
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).To(HaveOccurred())
+
+			Expect(err.Error()).To(HavePrefix("iam.serviceAccounts[1].attachPolicyARNs or iam.serviceAccounts[1].attachPolicy must be set"))
+		})
+
+		It("should fail when non-uniquely named iam.serviceAccounts are given", func() {
+			cfg.IAM.WithOIDC = Enabled()
+
+			cfg.IAM.ServiceAccounts = []*ClusterIAMServiceAccount{{}, {}, {}, {}, {}}
+			cfg.IAM.ServiceAccounts[0].Name = "sa-1"
+			cfg.IAM.ServiceAccounts[0].AttachPolicyARNs = []string{""}
+
+			cfg.IAM.ServiceAccounts[1].Name = "sa-2"
+			cfg.IAM.ServiceAccounts[1].Namespace = "ns-2"
+			cfg.IAM.ServiceAccounts[1].AttachPolicyARNs = []string{""}
+
+			cfg.IAM.ServiceAccounts[2].Name = "sa-2"
+			cfg.IAM.ServiceAccounts[2].Namespace = "ns-2"
+			cfg.IAM.ServiceAccounts[2].AttachPolicy = map[string]interface{}{"Statement": "foo"}
+
+			cfg.IAM.ServiceAccounts[3].Name = "sa-3"
+			cfg.IAM.ServiceAccounts[3].AttachPolicy = map[string]interface{}{"Statement": "foo"}
+
+			cfg.IAM.ServiceAccounts[4].Name = "sa-1"
+			cfg.IAM.ServiceAccounts[4].AttachPolicy = map[string]interface{}{"Statement": "foo"}
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(HavePrefix("<namespace>/<name> of iam.serviceAccounts[2] \"ns-2/sa-2\" is not unique"))
+
+			cfg.IAM.ServiceAccounts[2].Namespace = "ns-3"
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(HavePrefix("<namespace>/<name> of iam.serviceAccounts[4] \"/sa-1\" is not unique"))
+		})
+	})
+
 	Describe("cloudWatch.clusterLogging", func() {
 		var (
 			cfg *ClusterConfig
@@ -14,6 +274,13 @@ var _ = Describe("ClusterConfig validation", func() {
 
 		BeforeEach(func() {
 			cfg = NewClusterConfig()
+		})
+
+		It("should handle known types", func() {
+			cfg.CloudWatch.ClusterLogging.EnableTypes = []string{"api"}
+
+			err = ValidateClusterConfig(cfg)
+			Expect(err).ToNot(HaveOccurred())
 		})
 
 		It("should handle unknown types", func() {
@@ -164,7 +431,7 @@ var _ = Describe("ClusterConfig validation", func() {
 					"authorization", "serverTLSBootstrap"}
 
 				for _, key := range testKeys {
-					ng.KubeletExtraConfig = &NodeGroupKubeletConfig{
+					ng.KubeletExtraConfig = &InlineDocument{
 						key: "should-not-be-allowed",
 					}
 					err := validateNodeGroupKubeletExtraConfig(ng.KubeletExtraConfig)
@@ -173,7 +440,7 @@ var _ = Describe("ClusterConfig validation", func() {
 			})
 
 			It("Allows other kubelet options", func() {
-				ng.KubeletExtraConfig = &NodeGroupKubeletConfig{
+				ng.KubeletExtraConfig = &InlineDocument{
 					"kubeReserved": map[string]string{
 						"cpu":               "300m",
 						"memory":            "300Mi",

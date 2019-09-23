@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/blang/semver"
 	jsonpatch "github.com/evanphx/json-patch"
@@ -25,16 +26,58 @@ import (
 	"k8s.io/client-go/restmapper"
 )
 
+// Interface is an alias to avoid having to import k8s.io/client-go/kubernetes
+// along with this package, so that most of our packages only care to import
+// our kubernetes package
+type Interface = kubeclient.Interface
+
+// ClientSetGetter is an interface used for anything that requires
+// to obtain Kubernetes client whe it's not possible to pass the
+// client directly
+type ClientSetGetter interface {
+	ClientSet() (Interface, error)
+}
+
+// CachedClientSet provides a basic implementation of ClientSetGetter
+// where the client is a field of a struct
+type CachedClientSet struct {
+	CachedClientSet Interface
+}
+
+// NewCachedClientSet costructs a new CachedClientSets
+func NewCachedClientSet(clientSet Interface) *CachedClientSet {
+	return &CachedClientSet{CachedClientSet: clientSet}
+}
+
+// ClientSet returns g.CachedClientSet or an error it is nil
+func (g *CachedClientSet) ClientSet() (Interface, error) {
+	if g.CachedClientSet == nil {
+		return nil, fmt.Errorf("no client instance provided")
+	}
+	return g.CachedClientSet, nil
+}
+
+// CallbackClientSet provides an implementation of ClientSetGetter
+// where the client is provided via a callback
+type CallbackClientSet struct {
+	Callback func() (Interface, error)
+}
+
+// ClientSet returns g.ClientSet or an error it is nil
+func (g *CallbackClientSet) ClientSet() (Interface, error) {
+	return g.Callback()
+}
+
 // RawClient stores information about the client config
 type RawClient struct {
 	mapper    meta.RESTMapper
 	config    *restclient.Config
-	clientSet kubeclient.Interface
+	clientSet Interface
 }
 
 // RawClientInterface defines high level abstraction for RawClient for testing
 type RawClientInterface interface {
-	ClientSet() kubeclient.Interface
+	ClientSet() Interface
 	NewRawResource(runtime.RawExtension) (*RawResource, error)
 }
 
@@ -46,7 +89,7 @@ type RawResource struct {
 }
 
 // NewRawClient creates a new raw REST client
-func NewRawClient(clientSet kubeclient.Interface, config *restclient.Config) (*RawClient, error) {
+func NewRawClient(clientSet Interface, config *restclient.Config) (*RawClient, error) {
 	c := &RawClient{
 		config:    config,
 		clientSet: clientSet,
@@ -98,7 +141,7 @@ func (c *RawClient) ServerVersion() (string, error) {
 }
 
 // ClientSet returns the underlying ClientSet
-func (c *RawClient) ClientSet() kubeclient.Interface { return c.clientSet }
+func (c *RawClient) ClientSet() Interface { return c.clientSet }
 
 // NewHelperFor construct a raw client helper instance for a give gvk
 // (it's based on k8s.io/kubernetes/pkg/kubectl/cmd/util/factory_client_access.go)
@@ -182,6 +225,62 @@ func (c *RawClient) createOrReplaceObject(object runtime.RawExtension, plan bool
 	return nil
 }
 
+// Delete attempts to delete the Kubernetes resources in the provided manifest,
+// or do nothing if they do not exist.
+func (c *RawClient) Delete(manifest []byte) error {
+	objects, err := NewRawExtensions(manifest)
+	if err != nil {
+		return err
+	}
+	for _, object := range objects {
+		if err := c.deleteObject(object); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *RawClient) deleteObject(object runtime.RawExtension) error {
+	resource, err := c.NewRawResource(object)
+	if err != nil {
+		return err
+	}
+	status, err := resource.DeleteSync()
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		logger.Info(status)
+	}
+	return nil
+}
+
+// Exists checks if the Kubernetes resources in the provided manifest exist or
+// not, and returns a map[<namespace>]map[<name>]bool to indicate each
+// resource's existence.
+func (c *RawClient) Exists(manifest []byte) (map[string]map[string]bool, error) {
+	objects, err := NewRawExtensions(manifest)
+	if err != nil {
+		return nil, err
+	}
+	existence := map[string]map[string]bool{}
+	for _, object := range objects {
+		resource, err := c.NewRawResource(object)
+		if err != nil {
+			return nil, err
+		}
+		exists, err := resource.Exists()
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := existence[resource.Info.Namespace]; !ok {
+			existence[resource.Info.Namespace] = map[string]bool{}
+		}
+		existence[resource.Info.Namespace][resource.Info.Name] = exists
+	}
+	return existence, nil
+}
+
 // String returns a canonical name of the resource
 func (r *RawResource) String() string {
 	description := ""
@@ -206,15 +305,11 @@ func (r *RawResource) LogAction(plan bool, verb string) string {
 
 // CreateOrReplace will check if the given resource exists, and create or update it as needed
 func (r *RawResource) CreateOrReplace(plan bool) (string, error) {
-	create := false
-	if _, err := r.Helper.Get(r.Info.Namespace, r.Info.Name, false); err != nil {
-		if !apierrs.IsNotFound(err) {
-			return "", errors.Wrap(err, "unexpected non-404 error")
-		}
-		create = true
+	exists, _, err := r.exists()
+	if err != nil {
+		return "", errors.Wrap(err, "unexpected non-404 error")
 	}
-
-	if create {
+	if !exists {
 		_, err := r.Helper.Create(r.Info.Namespace, !plan, r.Info.Object, &metav1.CreateOptions{})
 		if err != nil {
 			return "", err
@@ -253,16 +348,12 @@ func (r *RawResource) CreateOrReplace(plan bool) (string, error) {
 func (r *RawResource) CreatePatchOrReplace() error {
 	msg := func(verb string) { logger.Info("%s %q", verb, r) }
 
-	create := false
-	oldObj, err := r.Helper.Get(r.Info.Namespace, r.Info.Name, false)
+	exists, oldObj, err := r.exists()
 	if err != nil {
-		if !apierrs.IsNotFound(err) {
-			create = true
-		}
 		return err
 	}
 
-	if create {
+	if !exists {
 		_, err := r.Helper.Create(r.Info.Namespace, true, r.Info.Object, &metav1.CreateOptions{})
 		if err != nil {
 			return err
@@ -317,4 +408,67 @@ func (r *RawResource) CreatePatchOrReplace() error {
 	}
 	msg("patched")
 	return nil
+}
+
+// DeleteSync attempts to delete this Kubernetes resource, or returns doing
+// nothing if it does not exist. It blocks until the resource has been deleted.
+func (r *RawResource) DeleteSync() (string, error) {
+	exists, _, err := r.exists()
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", nil
+	}
+	propagationPolicy := metav1.DeletePropagationForeground
+	if _, err := r.Helper.DeleteWithOptions(r.Info.Namespace, r.Info.Name, &metav1.DeleteOptions{
+		PropagationPolicy: &propagationPolicy,
+	}); err != nil {
+		return "", err
+	}
+	if err := r.waitForDeletion(); err != nil {
+		return "", err
+	}
+	return r.LogAction(false, "deleted"), nil
+}
+
+const maxWaitingTime = 2 * 60 * time.Second
+
+func (r *RawResource) waitForDeletion() error {
+	// Wait for the resource's deletion, typically to avoid "races" as much as
+	// possible on eksctl's side, as objects may be still "TERMINATING" while
+	// eksctl then tries to create them again.
+	waitingTime := maxWaitingTime
+	checkInterval := 1 * time.Second
+	for waitingTime > 0 {
+		exists, _, err := r.exists()
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+		time.Sleep(checkInterval)
+		waitingTime = waitingTime - checkInterval
+		checkInterval = 2 * checkInterval
+	}
+	return fmt.Errorf("waited for %v's deletion, but could not confirm it within %v", r, maxWaitingTime)
+}
+
+// Exists checks if this Kubernetes resource exists or not, and returns true if
+// so, or false otherwise.
+func (r *RawResource) Exists() (bool, error) {
+	exists, _, err := r.exists()
+	return exists, err
+}
+
+func (r *RawResource) exists() (bool, runtime.Object, error) {
+	obj, err := r.Helper.Get(r.Info.Namespace, r.Info.Name, false)
+	if err != nil {
+		if apierrs.IsNotFound(err) {
+			return false, nil, nil
+		}
+		return false, nil, err
+	}
+	return true, obj, nil
 }

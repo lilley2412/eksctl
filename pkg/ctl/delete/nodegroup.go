@@ -2,64 +2,67 @@ package delete
 
 import (
 	"github.com/kris-nova/logger"
-	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/authconfigmap"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
 	"github.com/weaveworks/eksctl/pkg/drain"
-	"github.com/weaveworks/eksctl/pkg/eks"
 )
 
-func deleteNodeGroupCmd(rc *cmdutils.ResourceCmd) {
+func deleteNodeGroupCmd(cmd *cmdutils.Cmd) {
 	cfg := api.NewClusterConfig()
 	ng := cfg.NewNodeGroup()
-	rc.ClusterConfig = cfg
+	cmd.ClusterConfig = cfg
 
 	var updateAuthConfigMap, deleteNodeGroupDrain, onlyMissing bool
 
-	rc.SetDescription("nodegroup", "Delete a nodegroup", "", "ng")
+	cmd.SetDescription("nodegroup", "Delete a nodegroup", "", "ng")
 
-	rc.SetRunFuncWithNameArg(func() error {
-		return doDeleteNodeGroup(rc, ng, updateAuthConfigMap, deleteNodeGroupDrain, onlyMissing)
+	cmd.SetRunFuncWithNameArg(func() error {
+		return doDeleteNodeGroup(cmd, ng, updateAuthConfigMap, deleteNodeGroupDrain, onlyMissing)
 	})
 
-	rc.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
 		fs.StringVar(&cfg.Metadata.Name, "cluster", "", "EKS cluster name")
-		cmdutils.AddRegionFlag(fs, rc.ProviderConfig)
+		cmdutils.AddRegionFlag(fs, cmd.ProviderConfig)
 		fs.StringVarP(&ng.Name, "name", "n", "", "Name of the nodegroup to delete")
-		cmdutils.AddConfigFileFlag(fs, &rc.ClusterConfigFile)
-		cmdutils.AddApproveFlag(fs, rc)
-		cmdutils.AddNodeGroupFilterFlags(fs, &rc.IncludeNodeGroups, &rc.ExcludeNodeGroups)
+		cmdutils.AddConfigFileFlag(fs, &cmd.ClusterConfigFile)
+		cmdutils.AddApproveFlag(fs, cmd)
+		cmdutils.AddNodeGroupFilterFlags(fs, &cmd.Include, &cmd.Exclude)
 		fs.BoolVar(&onlyMissing, "only-missing", false, "Only delete nodegroups that are not defined in the given config file")
 		cmdutils.AddUpdateAuthConfigMap(fs, &updateAuthConfigMap, "Remove nodegroup IAM role from aws-auth configmap")
 		fs.BoolVar(&deleteNodeGroupDrain, "drain", true, "Drain and cordon all nodes in the nodegroup before deletion")
 
-		rc.Wait = false
-		cmdutils.AddWaitFlag(fs, &rc.Wait, "deletion of all resources")
+		cmd.Wait = false
+		cmdutils.AddWaitFlag(fs, &cmd.Wait, "deletion of all resources")
+		cmdutils.AddTimeoutFlag(fs, &cmd.ProviderConfig.WaitTimeout)
 	})
 
-	cmdutils.AddCommonFlagsForAWS(rc.FlagSetGroup, rc.ProviderConfig, true)
+	cmdutils.AddCommonFlagsForAWS(cmd.FlagSetGroup, cmd.ProviderConfig, true)
 }
 
-func doDeleteNodeGroup(rc *cmdutils.ResourceCmd, ng *api.NodeGroup, updateAuthConfigMap, deleteNodeGroupDrain, onlyMissing bool) error {
+func doDeleteNodeGroup(cmd *cmdutils.Cmd, ng *api.NodeGroup, updateAuthConfigMap, deleteNodeGroupDrain, onlyMissing bool) error {
 	ngFilter := cmdutils.NewNodeGroupFilter()
 
-	if err := cmdutils.NewDeleteNodeGroupLoader(rc, ng, ngFilter).Load(); err != nil {
+	if err := cmdutils.NewDeleteNodeGroupLoader(cmd, ng, ngFilter).Load(); err != nil {
 		return err
 	}
 
-	cfg := rc.ClusterConfig
+	cfg := cmd.ClusterConfig
 
-	ctl := eks.New(rc.ProviderConfig, cfg)
+	ctl, err := cmd.NewCtl()
+	if err != nil {
+		return err
+	}
+	logger.Info("using region %s", cfg.Metadata.Region)
 
 	if err := ctl.CheckAuth(); err != nil {
 		return err
 	}
 
-	if err := ctl.RefreshClusterConfig(cfg); err != nil {
-		return errors.Wrapf(err, "getting credentials for cluster %q", cfg.Metadata.Name)
+	if ok, err := ctl.CanOperate(cfg); !ok {
+		return err
 	}
 
 	clientSet, err := ctl.NewStdClientSet(cfg)
@@ -69,72 +72,62 @@ func doDeleteNodeGroup(rc *cmdutils.ResourceCmd, ng *api.NodeGroup, updateAuthCo
 
 	stackManager := ctl.NewStackManager(cfg)
 
-	if rc.ClusterConfigFile != "" {
-		logger.Info("comparing %d nodegroups defined in the given config (%q) against remote state", len(cfg.NodeGroups), rc.ClusterConfigFile)
+	if cmd.ClusterConfigFile != "" {
+		logger.Info("comparing %d nodegroups defined in the given config (%q) against remote state", len(cfg.NodeGroups), cmd.ClusterConfigFile)
 		if err := ngFilter.SetIncludeOrExcludeMissingFilter(stackManager, onlyMissing, &cfg.NodeGroups); err != nil {
 			return err
 		}
 	}
 
-	ngSubset, _ := ngFilter.MatchAll(cfg.NodeGroups)
-	ngCount := ngSubset.Len()
+	filteredNodeGroups := ngFilter.FilterMatching(cfg.NodeGroups)
 
 	ngFilter.LogInfo(cfg.NodeGroups)
 
 	if updateAuthConfigMap {
-		cmdutils.LogIntendedAction(rc.Plan, "delete %d nodegroups from auth ConfigMap in cluster %q", ngCount, cfg.Metadata.Name)
-		err := ngFilter.ForEach(cfg.NodeGroups, func(_ int, ng *api.NodeGroup) error {
-			if rc.Plan {
-				return nil
-			}
-			if ng.IAM == nil || ng.IAM.InstanceRoleARN == "" {
-				if err := ctl.GetNodeGroupIAM(stackManager, cfg, ng); err != nil {
-					logger.Warning("error getting instance role ARN for nodegroup %q", ng.Name)
-					return nil
+		cmdutils.LogIntendedAction(cmd.Plan, "delete %d nodegroups from auth ConfigMap in cluster %q", len(filteredNodeGroups), cfg.Metadata.Name)
+		if !cmd.Plan {
+			for _, ng := range filteredNodeGroups {
+				if ng.IAM == nil || ng.IAM.InstanceRoleARN == "" {
+					if err := ctl.GetNodeGroupIAM(stackManager, cfg, ng); err != nil {
+						logger.Warning("error getting instance role ARN for nodegroup %q", ng.Name)
+						return nil
+					}
+				}
+				if err := authconfigmap.RemoveNodeGroup(clientSet, ng); err != nil {
+					logger.Warning(err.Error())
 				}
 			}
-			if err := authconfigmap.RemoveNodeGroup(clientSet, ng); err != nil {
-				logger.Warning(err.Error())
-			}
-			return nil
-		})
-		if err != nil {
-			return err
 		}
 	}
 
 	if deleteNodeGroupDrain {
-		cmdutils.LogIntendedAction(rc.Plan, "drain %d nodegroups in cluster %q", ngCount, cfg.Metadata.Name)
-		err := ngFilter.ForEach(cfg.NodeGroups, func(_ int, ng *api.NodeGroup) error {
-			if rc.Plan {
-				return nil
+		cmdutils.LogIntendedAction(cmd.Plan, "drain %d nodegroups in cluster %q", len(filteredNodeGroups), cfg.Metadata.Name)
+		if !cmd.Plan {
+			for _, ng := range filteredNodeGroups {
+				if err := drain.NodeGroup(clientSet, ng, ctl.Provider.WaitTimeout(), false); err != nil {
+					return err
+				}
 			}
-			if err := drain.NodeGroup(clientSet, ng, ctl.Provider.WaitTimeout(), false); err != nil {
-				return err
-			}
-			return nil
-		})
-		if err != nil {
-			return err
 		}
 	}
 
-	cmdutils.LogIntendedAction(rc.Plan, "delete %d nodegroups from cluster %q", ngCount, cfg.Metadata.Name)
+	cmdutils.LogIntendedAction(cmd.Plan, "delete %d nodegroups from cluster %q", len(filteredNodeGroups), cfg.Metadata.Name)
 
 	{
-		tasks, err := stackManager.NewTasksToDeleteNodeGroups(ngSubset, rc.Wait, nil)
+		ngSubset, _ := ngFilter.MatchAll(cfg.NodeGroups)
+		tasks, err := stackManager.NewTasksToDeleteNodeGroups(ngSubset.Has, cmd.Wait, nil)
 		if err != nil {
 			return err
 		}
-		tasks.PlanMode = rc.Plan
+		tasks.PlanMode = cmd.Plan
 		logger.Info(tasks.Describe())
 		if errs := tasks.DoAllSync(); len(errs) > 0 {
 			return handleErrors(errs, "nodegroup(s)")
 		}
-		cmdutils.LogCompletedAction(rc.Plan, "deleted %d nodegroups from cluster %q", ngCount, cfg.Metadata.Name)
+		cmdutils.LogCompletedAction(cmd.Plan, "deleted %d nodegroups from cluster %q", len(filteredNodeGroups), cfg.Metadata.Name)
 	}
 
-	cmdutils.LogPlanModeWarning(rc.Plan && ngCount > 0)
+	cmdutils.LogPlanModeWarning(cmd.Plan && len(filteredNodeGroups) > 0)
 
 	return nil
 }

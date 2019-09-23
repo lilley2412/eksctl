@@ -5,62 +5,67 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
-	"github.com/weaveworks/eksctl/pkg/eks"
 )
 
-func scaleNodeGroupCmd(rc *cmdutils.ResourceCmd) {
+func scaleNodeGroupCmd(cmd *cmdutils.Cmd) {
 	cfg := api.NewClusterConfig()
 	ng := cfg.NewNodeGroup()
-	rc.ClusterConfig = cfg
+	cmd.ClusterConfig = cfg
 
-	rc.SetDescription("nodegroup", "Scale a nodegroup", "", "ng")
+	cmd.SetDescription("nodegroup", "Scale a nodegroup", "", "ng")
 
-	rc.SetRunFuncWithNameArg(func() error {
-		return doScaleNodeGroup(rc, ng)
+	cmd.SetRunFuncWithNameArg(func() error {
+		return doScaleNodeGroup(cmd, ng)
 	})
 
-	rc.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
 		fs.StringVar(&cfg.Metadata.Name, "cluster", "", "EKS cluster name")
 		fs.StringVarP(&ng.Name, "name", "n", "", "Name of the nodegroup to scale")
 
 		desiredCapacity := fs.IntP("nodes", "N", -1, "total number of nodes (scale to this number)")
-		cmdutils.AddPreRun(rc.Command, func(cmd *cobra.Command, args []string) {
-			if f := cmd.Flag("nodes"); f.Changed {
+		cmdutils.AddPreRun(cmd.CobraCommand, func(cobraCmd *cobra.Command, args []string) {
+			if f := cobraCmd.Flag("nodes"); f.Changed {
 				ng.DesiredCapacity = desiredCapacity
 			}
 		})
 
-		cmdutils.AddRegionFlag(fs, rc.ProviderConfig)
+		cmdutils.AddRegionFlag(fs, cmd.ProviderConfig)
+		cmdutils.AddTimeoutFlag(fs, &cmd.ProviderConfig.WaitTimeout)
 	})
 
-	cmdutils.AddCommonFlagsForAWS(rc.FlagSetGroup, rc.ProviderConfig, true)
+	cmdutils.AddCommonFlagsForAWS(cmd.FlagSetGroup, cmd.ProviderConfig, true)
 }
 
-func doScaleNodeGroup(rc *cmdutils.ResourceCmd, ng *api.NodeGroup) error {
-	cfg := rc.ClusterConfig
+func doScaleNodeGroup(cmd *cmdutils.Cmd, ng *api.NodeGroup) error {
+	cfg := cmd.ClusterConfig
 
-	ctl := eks.New(rc.ProviderConfig, cfg)
-
-	if err := ctl.CheckAuth(); err != nil {
-		return err
-	}
-
+	// TODO: move this into a loader when --config-file gets added to this command
 	if cfg.Metadata.Name == "" {
 		return cmdutils.ErrMustBeSet("--cluster")
 	}
 
-	if ng.Name != "" && rc.NameArg != "" {
-		return cmdutils.ErrNameFlagAndArg(ng.Name, rc.NameArg)
+	if ng.Name != "" && cmd.NameArg != "" {
+		return cmdutils.ErrNameFlagAndArg(ng.Name, cmd.NameArg)
 	}
 
-	if rc.NameArg != "" {
-		ng.Name = rc.NameArg
+	if cmd.NameArg != "" {
+		ng.Name = cmd.NameArg
 	}
 
 	if ng.Name == "" {
 		return cmdutils.ErrMustBeSet("--name")
+	}
+
+	ctl, err := cmd.NewCtl()
+	if err != nil {
+		return err
+	}
+
+	if err := ctl.CheckAuth(); err != nil {
+		return err
 	}
 
 	if ng.DesiredCapacity == nil || *ng.DesiredCapacity < 0 {
@@ -68,7 +73,7 @@ func doScaleNodeGroup(rc *cmdutils.ResourceCmd, ng *api.NodeGroup) error {
 	}
 
 	stackManager := ctl.NewStackManager(cfg)
-	err := stackManager.ScaleNodeGroup(ng)
+	err = stackManager.ScaleNodeGroup(ng)
 	if err != nil {
 		return fmt.Errorf("failed to scale nodegroup for cluster %q, error %v", cfg.Metadata.Name, err)
 	}

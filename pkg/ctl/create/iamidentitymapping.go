@@ -8,16 +8,15 @@ import (
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/authconfigmap"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
-	"github.com/weaveworks/eksctl/pkg/eks"
 )
 
-func createIAMIdentityMappingCmd(rc *cmdutils.ResourceCmd) {
+func createIAMIdentityMappingCmd(cmd *cmdutils.Cmd) {
 	cfg := api.NewClusterConfig()
-	rc.ClusterConfig = cfg
+	cmd.ClusterConfig = cfg
 
 	id := &authconfigmap.MapRole{}
 
-	rc.SetDescription("iamidentitymapping", "Create an IAM identity mapping",
+	cmd.SetDescription("iamidentitymapping", "Create an IAM identity mapping",
 		dedent.Dedent(`Creates a mapping from IAM role to Kubernetes user and groups.
 
 			Note aws-iam-authenticator only considers the last entry for any given
@@ -26,30 +25,35 @@ func createIAMIdentityMappingCmd(rc *cmdutils.ResourceCmd) {
 		`),
 	)
 
-	rc.SetRunFunc(func() error {
-		return doCreateIAMIdentityMapping(rc, id)
+	cmd.SetRunFunc(func() error {
+		return doCreateIAMIdentityMapping(cmd, id)
 	})
 
-	rc.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
 		fs.StringVar(&id.RoleARN, "role", "", "ARN of the IAM role to create")
 		fs.StringVar(&id.Username, "username", "", "User name within Kubernetes to map to IAM role")
 		fs.StringArrayVar(&id.Groups, "group", []string{}, "Group within Kubernetes to which IAM role is mapped")
 		cmdutils.AddNameFlag(fs, cfg.Metadata)
-		cmdutils.AddRegionFlag(fs, rc.ProviderConfig)
-		cmdutils.AddConfigFileFlag(fs, &rc.ClusterConfigFile)
+		cmdutils.AddRegionFlag(fs, cmd.ProviderConfig)
+		cmdutils.AddConfigFileFlag(fs, &cmd.ClusterConfigFile)
+		cmdutils.AddTimeoutFlag(fs, &cmd.ProviderConfig.WaitTimeout)
 	})
 
-	cmdutils.AddCommonFlagsForAWS(rc.FlagSetGroup, rc.ProviderConfig, false)
+	cmdutils.AddCommonFlagsForAWS(cmd.FlagSetGroup, cmd.ProviderConfig, false)
 }
 
-func doCreateIAMIdentityMapping(rc *cmdutils.ResourceCmd, id *authconfigmap.MapRole) error {
-	if err := cmdutils.NewMetadataLoader(rc).Load(); err != nil {
+func doCreateIAMIdentityMapping(cmd *cmdutils.Cmd, id *authconfigmap.MapRole) error {
+	if err := cmdutils.NewMetadataLoader(cmd).Load(); err != nil {
 		return err
 	}
 
-	cfg := rc.ClusterConfig
+	cfg := cmd.ClusterConfig
 
-	ctl := eks.New(rc.ProviderConfig, cfg)
+	ctl, err := cmd.NewCtl()
+	if err != nil {
+		return err
+	}
+	logger.Info("using region %s", cfg.Metadata.Region)
 
 	if err := ctl.CheckAuth(); err != nil {
 		return err
@@ -64,7 +68,7 @@ func doCreateIAMIdentityMapping(rc *cmdutils.ResourceCmd, id *authconfigmap.MapR
 		return err
 	}
 
-	if err := ctl.RefreshClusterConfig(cfg); err != nil {
+	if ok, err := ctl.CanOperate(cfg); !ok {
 		return err
 	}
 	clientSet, err := ctl.NewStdClientSet(cfg)

@@ -9,47 +9,51 @@ import (
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
-	"github.com/weaveworks/eksctl/pkg/eks"
 )
 
-func describeStacksCmd(rc *cmdutils.ResourceCmd) {
+func describeStacksCmd(cmd *cmdutils.Cmd) {
 	cfg := api.NewClusterConfig()
-	rc.ClusterConfig = cfg
+	cmd.ClusterConfig = cfg
 
 	var all, events, trail bool
 
-	rc.SetDescription("describe-stacks", "Describe CloudFormation stack for a given cluster", "")
+	cmd.SetDescription("describe-stacks", "Describe CloudFormation stack for a given cluster", "")
 
-	rc.SetRunFuncWithNameArg(func() error {
-		return doDescribeStacksCmd(rc, all, events, trail)
+	cmd.SetRunFuncWithNameArg(func() error {
+		return doDescribeStacksCmd(cmd, all, events, trail)
 	})
 
-	rc.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
 		cmdutils.AddNameFlag(fs, cfg.Metadata)
-		cmdutils.AddRegionFlag(fs, rc.ProviderConfig)
+		cmdutils.AddRegionFlag(fs, cmd.ProviderConfig)
 		fs.BoolVar(&all, "all", false, "include deleted stacks")
 		fs.BoolVar(&events, "events", false, "include stack events")
 		fs.BoolVar(&trail, "trail", false, "lookup CloudTrail events for the cluster")
+		cmdutils.AddTimeoutFlag(fs, &cmd.ProviderConfig.WaitTimeout)
 	})
 
-	cmdutils.AddCommonFlagsForAWS(rc.FlagSetGroup, rc.ProviderConfig, false)
+	cmdutils.AddCommonFlagsForAWS(cmd.FlagSetGroup, cmd.ProviderConfig, false)
 }
 
-func doDescribeStacksCmd(rc *cmdutils.ResourceCmd, all, events, trail bool) error {
-	cfg := rc.ClusterConfig
+func doDescribeStacksCmd(cmd *cmdutils.Cmd, all, events, trail bool) error {
+	cfg := cmd.ClusterConfig
 
-	ctl := eks.New(rc.ProviderConfig, cfg)
+	ctl, err := cmd.NewCtl()
+	if err != nil {
+		return err
+	}
+	logger.Info("using region %s", cfg.Metadata.Region)
 
 	if err := ctl.CheckAuth(); err != nil {
 		return err
 	}
 
-	if cfg.Metadata.Name != "" && rc.NameArg != "" {
-		return fmt.Errorf("--name=%s and argument %s cannot be used at the same time", cfg.Metadata.Name, rc.NameArg)
+	if cfg.Metadata.Name != "" && cmd.NameArg != "" {
+		return fmt.Errorf("--name=%s and argument %s cannot be used at the same time", cfg.Metadata.Name, cmd.NameArg)
 	}
 
-	if rc.NameArg != "" {
-		cfg.Metadata.Name = rc.NameArg
+	if cmd.NameArg != "" {
+		cfg.Metadata.Name = cmd.NameArg
 	}
 
 	if cfg.Metadata.Name == "" {

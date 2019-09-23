@@ -9,13 +9,12 @@ import (
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
-	"github.com/weaveworks/eksctl/pkg/eks"
 	"github.com/weaveworks/eksctl/pkg/utils/kubeconfig"
 )
 
-func writeKubeconfigCmd(rc *cmdutils.ResourceCmd) {
+func writeKubeconfigCmd(cmd *cmdutils.Cmd) {
 	cfg := api.NewClusterConfig()
-	rc.ClusterConfig = cfg
+	cmd.ClusterConfig = cfg
 
 	var (
 		outputPath           string
@@ -23,39 +22,35 @@ func writeKubeconfigCmd(rc *cmdutils.ResourceCmd) {
 		setContext, autoPath bool
 	)
 
-	rc.SetDescription("write-kubeconfig", "Write kubeconfig file for a given cluster", "")
+	cmd.SetDescription("write-kubeconfig", "Write kubeconfig file for a given cluster", "")
 
-	rc.SetRunFuncWithNameArg(func() error {
-		return doWriteKubeconfigCmd(rc, outputPath, authenticatorRoleARN, setContext, autoPath)
+	cmd.SetRunFuncWithNameArg(func() error {
+		return doWriteKubeconfigCmd(cmd, outputPath, authenticatorRoleARN, setContext, autoPath)
 	})
 
-	rc.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
 		cmdutils.AddNameFlag(fs, cfg.Metadata)
-		cmdutils.AddRegionFlag(fs, rc.ProviderConfig)
+		cmdutils.AddRegionFlag(fs, cmd.ProviderConfig)
+		cmdutils.AddTimeoutFlag(fs, &cmd.ProviderConfig.WaitTimeout)
 	})
 
-	rc.FlagSetGroup.InFlagSet("Output kubeconfig", func(fs *pflag.FlagSet) {
+	cmd.FlagSetGroup.InFlagSet("Output kubeconfig", func(fs *pflag.FlagSet) {
 		cmdutils.AddCommonFlagsForKubeconfig(fs, &outputPath, &authenticatorRoleARN, &setContext, &autoPath, "<name>")
 	})
 
-	cmdutils.AddCommonFlagsForAWS(rc.FlagSetGroup, rc.ProviderConfig, false)
+	cmdutils.AddCommonFlagsForAWS(cmd.FlagSetGroup, cmd.ProviderConfig, false)
 }
 
-func doWriteKubeconfigCmd(rc *cmdutils.ResourceCmd, outputPath, roleARN string, setContext, autoPath bool) error {
-	cfg := rc.ClusterConfig
+func doWriteKubeconfigCmd(cmd *cmdutils.Cmd, outputPath, roleARN string, setContext, autoPath bool) error {
+	cfg := cmd.ClusterConfig
 
-	ctl := eks.New(rc.ProviderConfig, cfg)
-
-	if err := ctl.CheckAuth(); err != nil {
-		return err
+	// TODO: move this into a loader when --config-file gets added to this command
+	if cfg.Metadata.Name != "" && cmd.NameArg != "" {
+		return cmdutils.ErrNameFlagAndArg(cfg.Metadata.Name, cmd.NameArg)
 	}
 
-	if cfg.Metadata.Name != "" && rc.NameArg != "" {
-		return cmdutils.ErrNameFlagAndArg(cfg.Metadata.Name, rc.NameArg)
-	}
-
-	if rc.NameArg != "" {
-		cfg.Metadata.Name = rc.NameArg
+	if cmd.NameArg != "" {
+		cfg.Metadata.Name = cmd.NameArg
 	}
 
 	if cfg.Metadata.Name == "" {
@@ -69,7 +64,17 @@ func doWriteKubeconfigCmd(rc *cmdutils.ResourceCmd, outputPath, roleARN string, 
 		outputPath = kubeconfig.AutoPath(cfg.Metadata.Name)
 	}
 
-	if err := ctl.RefreshClusterConfig(cfg); err != nil {
+	ctl, err := cmd.NewCtl()
+	if err != nil {
+		return err
+	}
+	logger.Info("using region %s", cfg.Metadata.Region)
+
+	if err := ctl.CheckAuth(); err != nil {
+		return err
+	}
+
+	if ok, err := ctl.CanOperate(cfg); !ok {
 		return err
 	}
 

@@ -3,12 +3,14 @@ package manager
 import (
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/util/sets"
+	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
+	iamoidc "github.com/weaveworks/eksctl/pkg/iam/oidc"
+	"github.com/weaveworks/eksctl/pkg/kubernetes"
 )
 
 // NewTasksToCreateClusterWithNodeGroups defines all tasks required to create a cluster along
 // with some nodegroups; see CreateAllNodeGroups for how onlyNodeGroupSubset works
-func (c *StackCollection) NewTasksToCreateClusterWithNodeGroups(onlyNodeGroupSubset sets.String) *TaskTree {
+func (c *StackCollection) NewTasksToCreateClusterWithNodeGroups(nodeGroups []*api.NodeGroup) *TaskTree {
 	tasks := &TaskTree{Parallel: false}
 
 	tasks.Append(
@@ -18,7 +20,7 @@ func (c *StackCollection) NewTasksToCreateClusterWithNodeGroups(onlyNodeGroupSub
 		},
 	)
 
-	nodeGroupTasks := c.NewTasksToCreateNodeGroups(onlyNodeGroupSubset)
+	nodeGroupTasks := c.NewTasksToCreateNodeGroups(nodeGroups)
 	if nodeGroupTasks.Len() > 0 {
 		nodeGroupTasks.IsSubTask = true
 		tasks.Append(nodeGroupTasks)
@@ -27,23 +29,50 @@ func (c *StackCollection) NewTasksToCreateClusterWithNodeGroups(onlyNodeGroupSub
 	return tasks
 }
 
-// NewTasksToCreateNodeGroups defines tasks required to create all of the nodegroups if
-// onlySubset is nil, otherwise just the tasks for nodegroups that are in onlySubset
-// will be defined
-func (c *StackCollection) NewTasksToCreateNodeGroups(onlySubset sets.String) *TaskTree {
+// NewTasksToCreateNodeGroups defines tasks required to create all of the nodegroups
+func (c *StackCollection) NewTasksToCreateNodeGroups(nodeGroups []*api.NodeGroup) *TaskTree {
 	tasks := &TaskTree{Parallel: true}
 
-	for i := range c.spec.NodeGroups {
-		ng := c.spec.NodeGroups[i]
-		if onlySubset != nil && !onlySubset.Has(ng.Name) {
-			continue
-		}
+	for _, ng := range nodeGroups {
 		tasks.Append(&taskWithNodeGroupSpec{
-			info:      fmt.Sprintf("create nodegroup %q", ng.Name),
+			info:      fmt.Sprintf("create nodegroup %q", ng.NameString()),
 			nodeGroup: ng,
 			call:      c.createNodeGroupTask,
 		})
+		// TODO: move authconfigmap tasks here using kubernetesTask and kubernetes.CallbackClientSet
 	}
 
+	return tasks
+}
+
+// NewTasksToCreateIAMServiceAccounts defines tasks required to create all of the IAM ServiceAccounts
+func (c *StackCollection) NewTasksToCreateIAMServiceAccounts(serviceAccounts []*api.ClusterIAMServiceAccount, oidc *iamoidc.OpenIDConnectManager, clientSetGetter kubernetes.ClientSetGetter) *TaskTree {
+	tasks := &TaskTree{Parallel: true}
+
+	for i := range serviceAccounts {
+		sa := serviceAccounts[i]
+		saTasks := &TaskTree{
+			Parallel:  false,
+			IsSubTask: true,
+		}
+
+		saTasks.Append(&taskWithClusterIAMServiceAccountSpec{
+			info:           fmt.Sprintf("create IAM role for serviceaccount %q", sa.NameString()),
+			serviceAccount: sa,
+			oidc:           oidc,
+			call:           c.createIAMServiceAccountTask,
+		})
+
+		saTasks.Append(&kubernetesTask{
+			info:       fmt.Sprintf("create serviceaccount %q", sa.NameString()),
+			kubernetes: clientSetGetter,
+			call: func(clientSet kubernetes.Interface) error {
+				sa.SetAnnotations()
+				return kubernetes.MaybeCreateServiceAccountOrUpdateMetadata(clientSet, sa.ObjectMeta)
+			},
+		})
+
+		tasks.Append(saTasks)
+	}
 	return tasks
 }

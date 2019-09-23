@@ -11,22 +11,22 @@ import (
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 )
 
-// AddCommonCreateNodeGroupFlags adds common flags for creating a node group
-func AddCommonCreateNodeGroupFlags(fs *pflag.FlagSet, rc *ResourceCmd, ng *api.NodeGroup) {
+// AddCommonCreateNodeGroupFlags adds common flags for creating a nodegroup
+func AddCommonCreateNodeGroupFlags(fs *pflag.FlagSet, cmd *Cmd, ng *api.NodeGroup) {
 	fs.StringVarP(&ng.InstanceType, "node-type", "t", api.DefaultNodeType, "node instance type")
 
 	desiredCapacity := fs.IntP("nodes", "N", api.DefaultNodeCount, "total number of nodes (for a static ASG)")
 	minSize := fs.IntP("nodes-min", "m", api.DefaultNodeCount, "minimum nodes in ASG")
 	maxSize := fs.IntP("nodes-max", "M", api.DefaultNodeCount, "maximum nodes in ASG")
 
-	AddPreRun(rc.Command, func(cmd *cobra.Command, args []string) {
-		if f := cmd.Flag("nodes"); f.Changed {
+	AddPreRun(cmd.CobraCommand, func(cobraCmd *cobra.Command, args []string) {
+		if f := cobraCmd.Flag("nodes"); f.Changed {
 			ng.DesiredCapacity = desiredCapacity
 		}
-		if f := cmd.Flag("nodes-min"); f.Changed {
+		if f := cobraCmd.Flag("nodes-min"); f.Changed {
 			ng.MinSize = minSize
 		}
-		if f := cmd.Flag("nodes-max"); f.Changed {
+		if f := cobraCmd.Flag("nodes-max"); f.Changed {
 			ng.MaxSize = maxSize
 		}
 	})
@@ -69,7 +69,7 @@ func AddCommonCreateNodeGroupIAMAddonsFlags(fs *pflag.FlagSet, ng *api.NodeGroup
 // AddNodeGroupFilterFlags add common `--include` and `--exclude` flags for filtering nodegroups
 func AddNodeGroupFilterFlags(fs *pflag.FlagSet, includeGlobs, excludeGlobs *[]string) {
 	fs.StringSliceVar(includeGlobs, "only", nil, "")
-	fs.MarkDeprecated("only", "use --include")
+	_ = fs.MarkDeprecated("only", "use --include")
 
 	fs.StringSliceVar(includeGlobs, "include", nil,
 		"nodegroups to include (list of globs), e.g.: 'ng-team-?,prod-*'")

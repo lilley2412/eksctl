@@ -6,8 +6,11 @@ import (
 	"sync"
 
 	"github.com/kris-nova/logger"
+	"k8s.io/client-go/kubernetes"
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
+	iamoidc "github.com/weaveworks/eksctl/pkg/iam/oidc"
+	kubewrapper "github.com/weaveworks/eksctl/pkg/kubernetes"
 )
 
 // Task is a common interface for the stack manager tasks
@@ -122,71 +125,98 @@ func (t *TaskTree) DoAllSync() []error {
 	return allErrs
 }
 
-func info(skip bool, info string) string {
-	if skip {
-		return "(skip) " + info
-	}
-	return info
-}
-
 type taskWithoutParams struct {
 	info string
-	skip bool
 	call func(chan error) error
 }
 
-func (t *taskWithoutParams) Skip() bool               { return t.skip }
-func (t *taskWithoutParams) Describe() string         { return info(t.skip, t.info) }
+func (t *taskWithoutParams) Describe() string         { return t.info }
 func (t *taskWithoutParams) Do(errs chan error) error { return t.call(errs) }
 
 type taskWithNameParam struct {
 	info string
-	skip bool
 	name string
 	call func(chan error, string) error
 }
 
-func (t *taskWithNameParam) Skip() bool               { return t.skip }
-func (t *taskWithNameParam) Describe() string         { return info(t.skip, t.info) }
+func (t *taskWithNameParam) Describe() string         { return t.info }
 func (t *taskWithNameParam) Do(errs chan error) error { return t.call(errs, t.name) }
 
 type taskWithNodeGroupSpec struct {
 	info      string
-	skip      bool
 	nodeGroup *api.NodeGroup
 	call      func(chan error, *api.NodeGroup) error
 }
 
-func (t *taskWithNodeGroupSpec) Skip() bool       { return t.skip }
-func (t *taskWithNodeGroupSpec) Describe() string { return info(t.skip, t.info) }
+func (t *taskWithNodeGroupSpec) Describe() string { return t.info }
 func (t *taskWithNodeGroupSpec) Do(errs chan error) error {
 	return t.call(errs, t.nodeGroup)
 }
 
+type taskWithClusterIAMServiceAccountSpec struct {
+	info           string
+	serviceAccount *api.ClusterIAMServiceAccount
+	oidc           *iamoidc.OpenIDConnectManager
+	call           func(chan error, *api.ClusterIAMServiceAccount, *iamoidc.OpenIDConnectManager) error
+}
+
+func (t *taskWithClusterIAMServiceAccountSpec) Describe() string { return t.info }
+func (t *taskWithClusterIAMServiceAccountSpec) Do(errs chan error) error {
+	return t.call(errs, t.serviceAccount, t.oidc)
+}
+
 type taskWithStackSpec struct {
 	info  string
-	skip  bool
 	stack *Stack
 	call  func(*Stack, chan error) error
 }
 
-func (t *taskWithStackSpec) Skip() bool       { return t.skip }
-func (t *taskWithStackSpec) Describe() string { return info(t.skip, t.info) }
+func (t *taskWithStackSpec) Describe() string { return t.info }
 func (t *taskWithStackSpec) Do(errs chan error) error {
 	return t.call(t.stack, errs)
 }
 
 type asyncTaskWithStackSpec struct {
 	info  string
-	skip  bool
 	stack *Stack
 	call  func(*Stack) (*Stack, error)
 }
 
-func (t *asyncTaskWithStackSpec) Skip() bool       { return t.skip }
-func (t *asyncTaskWithStackSpec) Describe() string { return info(t.skip, t.info) + " [async]" }
+func (t *asyncTaskWithStackSpec) Describe() string { return t.info + " [async]" }
 func (t *asyncTaskWithStackSpec) Do(errs chan error) error {
 	_, err := t.call(t.stack)
+	close(errs)
+	return err
+}
+
+type asyncTaskWithoutParams struct {
+	info string
+	call func() error
+}
+
+func (t *asyncTaskWithoutParams) Describe() string { return t.info }
+func (t *asyncTaskWithoutParams) Do(errs chan error) error {
+	err := t.call()
+	close(errs)
+	return err
+}
+
+type kubernetesTask struct {
+	info       string
+	kubernetes kubewrapper.ClientSetGetter
+	call       func(kubernetes.Interface) error
+}
+
+func (t *kubernetesTask) Describe() string { return t.info }
+func (t *kubernetesTask) Do(errs chan error) error {
+	if t.kubernetes == nil {
+		return fmt.Errorf("cannot start task %q as Kubernetes client configurtaion wasn't provided", t.Describe())
+	}
+	clientSet, err := t.kubernetes.ClientSet()
+	if err != nil {
+		return err
+	}
+	err = t.call(clientSet)
 	close(errs)
 	return err
 }
